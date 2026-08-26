@@ -287,6 +287,3 @@ func (n *NextDNS) OnShutdown() error {
 	n.client.close()
 	return nil
 }
-
-// shutdownGrace bounds how long OnShutdown waits for detached device lookups.
-const shutdownGrace = 5 * time.Second

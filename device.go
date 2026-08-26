@@ -128,6 +128,9 @@ const (
 	defaultReload  = 30 * time.Second
 	defaultARPPath = "/proc/net/arp"
 
+	// shutdownGrace bounds how long stop waits for detached device lookups.
+	shutdownGrace = 5 * time.Second
+
 	// maxBindings caps the remembered address-to-MAC map. It is fed from the
 	// ARP table, whose contents an on-link host can churn by cycling source
 	// addresses, and unlike the tables it is derived from it is never rebuilt.
