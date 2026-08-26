@@ -275,11 +275,11 @@ func parseNextDNS(c *caddy.Controller) (*NextDNS, error) {
 				if len(args) != 2 {
 					return nil, c.Errf("device_name needs an IP address and a name")
 				}
-				addr, err := netip.ParseAddr(args[0])
-				if err != nil {
-					return nil, c.Errf("invalid device_name address %q: %v", args[0], err)
+				addr, ok := clientAddr(args[0])
+				if !ok {
+					return nil, c.Errf("invalid device_name address %q", args[0])
 				}
-				n.devices.static[addr.Unmap()] = args[1]
+				n.devices.static[addr] = args[1]
 
 			case "device_names":
 				args := c.RemainingArgs()

@@ -203,8 +203,7 @@ func (n *NextDNS) profileFor(ctx context.Context, state *request.Request) string
 	}
 
 	if len(n.clientProfiles) > 0 {
-		if ip, err := netip.ParseAddr(state.IP()); err == nil {
-			ip = ip.Unmap()
+		if ip, ok := clientAddr(state.IP()); ok {
 			for _, cp := range n.clientProfiles {
 				if cp.prefix.Contains(ip) {
 					return cp.profile

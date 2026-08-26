@@ -137,16 +137,31 @@ const (
 	maxBindings = 8192
 )
 
+// clientAddr normalises the address a query came from into a form that can be
+// compared and stored: v4-mapped addresses unwrapped, and the interface zone
+// dropped.
+//
+// The zone matters. request.IP returns it verbatim, so a link-local client
+// arrives as "fe80::1%eth0" — and netip.Prefix.Contains is false for any
+// address carrying a zone, so such a client would match no client_profile and
+// no device_name, and the zone would travel to NextDNS in X-Device-Ip.
+func clientAddr(ip string) (netip.Addr, bool) {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return addr.Unmap().WithZone(""), true
+}
+
 // lookup builds the ClientInfo for the client that sent state, under a given
 // profile.
 func (d *deviceDB) lookup(ctx context.Context, state *request.Request, profile string) ClientInfo {
 	var ci ClientInfo
 
-	addr, err := netip.ParseAddr(state.IP())
-	if err != nil {
+	addr, ok := clientAddr(state.IP())
+	if !ok {
 		return ci
 	}
-	addr = addr.Unmap()
 
 	if d.sendIP {
 		ci.IP = addr.String()

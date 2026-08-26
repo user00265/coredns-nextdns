@@ -754,3 +754,58 @@ func TestServeDNSCountsMismatchedReplies(t *testing.T) {
 		t.Error("a mismatched reply reached the cache")
 	}
 }
+
+// request.IP returns the interface zone verbatim for a link-local client, and
+// netip.Prefix.Contains is false for any address carrying one — so a zoned
+// client used to match no client_profile and no device_name, and shipped the
+// zone to NextDNS in X-Device-Ip.
+func TestZonedAndMappedClientAddresses(t *testing.T) {
+	for _, tc := range []struct{ remote, want string }{
+		{"[fe80::1%eth0]:5353", "fe80::1"},
+		{"[fe80::1]:5353", "fe80::1"},
+		{"[::ffff:10.0.0.7]:5353", "10.0.0.7"},
+		{"10.0.0.7:5353", "10.0.0.7"},
+	} {
+		addr, ok := clientAddr(hostOf(tc.remote))
+		if !ok {
+			t.Errorf("%s: not parsed", tc.remote)
+			continue
+		}
+		if addr.String() != tc.want {
+			t.Errorf("%s -> %q, want %q", tc.remote, addr.String(), tc.want)
+		}
+	}
+
+	c, cap := fakeNextDNS(t, "")
+	n := newTestPlugin(t, c, "default1")
+	n.clientProfiles = []clientProfile{{prefix: mustPrefix("fe80::/10"), profile: "linklo"}}
+	n.devices.static[mustAddr("fe80::1")] = "Zoned-Device"
+
+	w := discoveryWriter{
+		local:  &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 53},
+		remote: &net.UDPAddr{IP: net.ParseIP("fe80::1"), Zone: "eth0", Port: 5353},
+	}
+	q := query("example.org.", dns.TypeA)
+	state := &request.Request{W: w, Req: q}
+
+	if got := n.profileFor(context.Background(), state); got != "linklo" {
+		t.Errorf("profile = %q, want linklo — the zone stopped the prefix matching", got)
+	}
+
+	ci := n.devices.lookup(context.Background(), state, "abc123")
+	if ci.IP != "fe80::1" {
+		t.Errorf("X-Device-Ip = %q, want the zone stripped", ci.IP)
+	}
+	if ci.Name != "Zoned-Device" {
+		t.Errorf("device name = %q, want the pinned name to match a zoned client", ci.Name)
+	}
+	_ = cap
+}
+
+func hostOf(hostport string) string {
+	h, _, err := net.SplitHostPort(hostport)
+	if err != nil {
+		return hostport
+	}
+	return h
+}
