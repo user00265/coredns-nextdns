@@ -147,10 +147,13 @@ profile — including one block per view, since each gets its own cache:
 }
 ```
 
-Use the built-in cache instead when one block routes to several profiles via `client_profile`,
-otherwise one profile's answers get served to another's clients. CoreDNS warns at startup if it spots
-that. The built-in cache also drops a profile's entries when NextDNS reports its configuration
-changed, so blocklist edits apply without waiting out TTLs.
+When one block routes to several profiles via `client_profile`, drop the *cache* plugin from that
+block and use `cache` inside `nextdns` instead. Adding the built-in cache is not enough on its own —
+the *cache* plugin runs first, so a query it answers never reaches this plugin, and its answer is
+whatever the first client to ask got, on whatever profile. CoreDNS warns at startup if it sees both.
+
+The built-in cache also drops a profile's entries when NextDNS reports its configuration changed, so
+blocklist edits apply without waiting out TTLs.
 
 Neither cache is keyed on the device, so per-device NextDNS settings within one profile won't work
 with caching on — the first device to ask answers for all of them. Turn caching off for a profile
@@ -291,8 +294,10 @@ log . "{remote} {name} {type} -> {/nextdns/profile-used} {/nextdns/device-name} 
 ```corefile
 .:53 {
     metadata
-    cache 3600
 
+    # No cache plugin here: this block reaches two profiles, and the cache
+    # plugin runs ahead of nextdns without knowing about profiles. The
+    # profile-aware cache below does that job instead.
     nextdns a1b2c3 {
         client_profile 10.20.30.0/24 1f2e3d
         client_profile 10.20.99.0/24 -

@@ -31,13 +31,16 @@ func setup(c *caddy.Controller) error {
 	})
 
 	c.OnStartup(func() error {
-		// The stock cache plugin keys on the question only. With more than one
-		// profile reachable from this block that silently serves one profile's
-		// answers to another profile's clients.
-		if n.cache == nil && len(n.profiles()) > 1 {
+		// The cache plugin keys on the question only, and it runs ahead of this
+		// one, so with more than one profile reachable from this block it serves
+		// one profile's answers to another profile's clients. Enabling the cache
+		// option here does not help: a query answered by the cache plugin never
+		// reaches this plugin at all.
+		if len(n.profiles()) > 1 {
 			if h := dnsserver.GetConfig(c).Handler("cache"); h != nil {
-				log.Warning("The cache plugin is not profile aware and this block routes to multiple NextDNS profiles; " +
-					"answers may leak between profiles. Enable the nextdns cache option, or split the profiles across server blocks.")
+				log.Warning("This block routes to multiple NextDNS profiles and also loads the cache plugin, which is " +
+					"not profile aware and runs first; answers will leak between profiles. Remove the cache plugin from " +
+					"this block and use the nextdns cache option, or split the profiles across server blocks.")
 			}
 		}
 		return n.OnStartup()

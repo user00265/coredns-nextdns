@@ -231,10 +231,20 @@ func (n *NextDNS) publish(ctx context.Context, profile string, ci ClientInfo) {
 		return
 	}
 	metadata.SetValueFunc(ctx, "nextdns/profile-used", func() string { return profile })
-	metadata.SetValueFunc(ctx, "nextdns/device-id", func() string { return ci.ID })
-	metadata.SetValueFunc(ctx, "nextdns/device-name", func() string { return ci.Name })
-	metadata.SetValueFunc(ctx, "nextdns/device-model", func() string { return ci.Model })
-	metadata.SetValueFunc(ctx, "nextdns/device-ip", func() string { return ci.IP })
+
+	// Publish only what was actually determined. An empty value would render as
+	// a blank in a log line, where the convention — and what is far easier to
+	// parse — is a "-" for a label that is not there.
+	for label, v := range map[string]string{
+		"nextdns/device-id":    ci.ID,
+		"nextdns/device-name":  ci.Name,
+		"nextdns/device-model": ci.Model,
+		"nextdns/device-ip":    ci.IP,
+	} {
+		if v != "" {
+			metadata.SetValueFunc(ctx, label, func() string { return v })
+		}
+	}
 }
 
 // profiles returns every profile ID this instance can route to.

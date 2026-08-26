@@ -277,6 +277,13 @@ func TestMetadataPublished(t *testing.T) {
 			t.Errorf("%s = %q, want %q", label, got, want)
 		}
 	}
+
+	// Nothing supplied a model here, so the label must be absent rather than
+	// empty: the log plugin renders a missing label as "-" and an empty one as a
+	// blank field.
+	if f := metadata.ValueFunc(ctx, "nextdns/device-model"); f != nil {
+		t.Errorf("nextdns/device-model published as %q, want the label omitted", f())
+	}
 }
 
 func TestMaxConcurrent(t *testing.T) {
