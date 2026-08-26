@@ -47,11 +47,6 @@ var log = clog.NewWithPlugin(pluginName)
 // ErrMaxConcurrent is returned when max_concurrent in-flight queries is exceeded.
 var ErrMaxConcurrent = errors.New("maximum concurrent queries exceeded")
 
-// badProfileOnce bounds the warning for an invalid profile from metadata: the
-// value is set per query, so logging every occurrence would let a misbehaving
-// plugin flood the log.
-var badProfileOnce sync.Once
-
 // clientProfile maps a client subnet to a profile.
 type clientProfile struct {
 	prefix  netip.Prefix
@@ -72,6 +67,13 @@ type NextDNS struct {
 	client  *dohClient
 	devices *deviceDB
 	cache   *msgCache
+
+	// badProfile bounds the warning for an invalid profile from metadata: the
+	// value is set per query, so logging every occurrence would let a
+	// misbehaving plugin flood the log. Per instance rather than per process,
+	// so one server block cannot silence the diagnostic for another, and a
+	// reload re-arms it.
+	badProfile sync.Once
 
 	maxConcurrent int64
 
@@ -182,7 +184,7 @@ func (n *NextDNS) profileFor(ctx context.Context, state *request.Request) string
 				return p
 			}
 			invalidProfileCount.Inc()
-			badProfileOnce.Do(func() {
+			n.badProfile.Do(func() {
 				log.Warningf("Ignoring invalid %s metadata value %q; expected 4 to 64 alphanumeric characters or %q. "+
 					"Further occurrences are counted in %s_%s_invalid_profiles_total, not logged.",
 					profileLabel, p, passthrough, plugin.Namespace, pluginName)

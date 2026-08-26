@@ -1,12 +1,15 @@
 package nextdns
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	stdlog "log"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -557,5 +560,38 @@ func TestServeDNSLeavesScrubbingToTheServer(t *testing.T) {
 	}
 	if size := rec.Msg.Len(); size > 512 {
 		t.Errorf("reply is %d bytes, want it scrubbed to the client's 512 byte buffer", size)
+	}
+}
+
+// The warning is bounded to once, but once per plugin instance — a package
+// level sync.Once would let one server block permanently silence the
+// diagnostic for every other block and for every later reload.
+func TestInvalidProfileWarningIsPerInstance(t *testing.T) {
+	var buf bytes.Buffer
+	stdlog.SetOutput(&buf)
+	t.Cleanup(func() { stdlog.SetOutput(os.Stderr) })
+
+	c, _ := fakeNextDNS(t, "")
+	state := &request.Request{W: &test.ResponseWriter{}, Req: query("example.org.", dns.TypeA)}
+
+	warn := func(n *NextDNS) {
+		ctx := metadata.ContextWithMetadata(context.Background())
+		metadata.SetValueFunc(ctx, profileLabel, func() string { return "not a profile" })
+		if got := n.profileFor(ctx, state); got != "default1" {
+			t.Fatalf("profile = %q, want the configured fallback", got)
+		}
+	}
+
+	first := newTestPlugin(t, c, "default1")
+	warn(first)
+	warn(first) // bounded: the second occurrence must not log again
+	if got := strings.Count(buf.String(), "Ignoring invalid"); got != 1 {
+		t.Errorf("one instance logged %d times, want exactly 1", got)
+	}
+
+	// A second instance has its own budget.
+	warn(newTestPlugin(t, c, "default1"))
+	if got := strings.Count(buf.String(), "Ignoring invalid"); got != 2 {
+		t.Errorf("logged %d times across two instances, want 2 — the second instance was silenced by the first", got)
 	}
 }
