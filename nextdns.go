@@ -263,21 +263,36 @@ func (n *NextDNS) publish(ctx context.Context, profile string, ci ClientInfo) {
 	}
 }
 
-// profiles returns every profile ID this instance can route to.
-func (n *NextDNS) profiles() []string {
+// reachableRoutes returns the distinct ways a query can be answered in this
+// server block. A route is a profile ID, or passthrough for the queries handed
+// to the next plugin — passthrough counts, because an unfiltered answer differs
+// from a NextDNS-filtered one exactly as much as two profiles differ from each
+// other.
+//
+// view is the name of the view bound to this block, empty if it has none.
+// CoreDNS binds at most one view per block and sets it on every query the block
+// handles, so when that view names a profile it is the only profile reachable
+// here and the other view_profile entries are dead config. They are excluded
+// rather than counted, which is what makes a shared snippet imported into
+// several view blocks come out single-routed.
+func (n *NextDNS) reachableRoutes(view string) []string {
+	if view != "" {
+		if p, ok := n.viewProfiles[view]; ok {
+			return []string{p}
+		}
+	}
+
 	seen := map[string]bool{}
 	var out []string
 	add := func(p string) {
-		if p == "" || p == passthrough || seen[p] {
+		if p == "" || seen[p] {
 			return
 		}
 		seen[p] = true
 		out = append(out, p)
 	}
+
 	add(n.profile)
-	for _, p := range n.viewProfiles {
-		add(p)
-	}
 	for _, cp := range n.clientProfiles {
 		add(cp.profile)
 	}

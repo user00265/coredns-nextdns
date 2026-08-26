@@ -349,3 +349,78 @@ func TestSetupTuningNeedsItsFeature(t *testing.T) {
 		}
 	}
 }
+
+// The warning that pairs the cache plugin with multi-profile routing has to
+// count the routes this block can actually take, not the ones configured — a
+// shared snippet imported into several view blocks configures many and reaches
+// one.
+func TestReachableRoutes(t *testing.T) {
+	shared := func() *NextDNS {
+		n := New()
+		n.profile = "homeprof"
+		n.viewProfiles = map[string]string{"guests": "guestprof", "iot": "iotprof"}
+		return n
+	}
+
+	tests := []struct {
+		name  string
+		build func() *NextDNS
+		view  string
+		want  int
+	}{
+		{"single profile, no view", func() *NextDNS { n := New(); n.profile = "abc123"; return n }, "", 1},
+
+		// A view that names a profile pins the block to it; the sibling
+		// view_profile entries are dead config here.
+		{"shared snippet in the guests view", shared, "guests", 1},
+		{"shared snippet in the iot view", shared, "iot", 1},
+		{"shared snippet with no view", shared, "", 1},
+
+		// A view with no profile of its own falls back to the general rules.
+		{"unmapped view", func() *NextDNS {
+			n := shared()
+			n.clientProfiles = []clientProfile{{prefix: mustPrefix("10.0.0.0/8"), profile: "subnet01"}}
+			return n
+		}, "other", 2},
+
+		// Client subnets are reachable in the same block, so they count.
+		{"client subnets", func() *NextDNS {
+			n := New()
+			n.profile = "abc123"
+			n.clientProfiles = []clientProfile{{prefix: mustPrefix("10.0.0.0/8"), profile: "def456"}}
+			return n
+		}, "", 2},
+
+		// Passthrough is a route: those clients get an unfiltered answer, which
+		// is exactly the difference the cache would erase.
+		{"passthrough counts", func() *NextDNS {
+			n := New()
+			n.profile = "abc123"
+			n.clientProfiles = []clientProfile{{prefix: mustPrefix("10.0.99.0/24"), profile: passthrough}}
+			return n
+		}, "", 2},
+
+		// The same profile named twice is one route.
+		{"duplicate profiles collapse", func() *NextDNS {
+			n := New()
+			n.profile = "abc123"
+			n.clientProfiles = []clientProfile{{prefix: mustPrefix("10.0.0.0/8"), profile: "abc123"}}
+			return n
+		}, "", 1},
+
+		// A view routed to passthrough is still one route.
+		{"view passthrough", func() *NextDNS {
+			n := New()
+			n.profile = "abc123"
+			n.viewProfiles = map[string]string{"internal": passthrough}
+			return n
+		}, "internal", 1},
+	}
+
+	for _, tc := range tests {
+		got := tc.build().reachableRoutes(tc.view)
+		if len(got) != tc.want {
+			t.Errorf("%s: reachableRoutes(%q) = %v (%d), want %d", tc.name, tc.view, got, len(got), tc.want)
+		}
+	}
+}

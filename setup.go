@@ -32,15 +32,21 @@ func setup(c *caddy.Controller) error {
 
 	c.OnStartup(func() error {
 		// The cache plugin keys on the question only, and it runs ahead of this
-		// one, so with more than one profile reachable from this block it serves
-		// one profile's answers to another profile's clients. Enabling the cache
-		// option here does not help: a query answered by the cache plugin never
+		// one, so when a block can answer the same question more than one way it
+		// serves one set of clients the other set's answers. Enabling the cache
+		// option here does not help: a query the cache plugin answers never
 		// reaches this plugin at all.
-		if len(n.profiles()) > 1 {
-			if h := dnsserver.GetConfig(c).Handler("cache"); h != nil {
-				log.Warning("This block routes to multiple NextDNS profiles and also loads the cache plugin, which is " +
-					"not profile aware and runs first; answers will leak between profiles. Remove the cache plugin from " +
-					"this block and use the nextdns cache option, or split the profiles across server blocks.")
+		//
+		// The view name is only known now — MakeServers fills it in after every
+		// plugin's setup has run — and it is what tells us how many of the
+		// configured routes this particular block can actually take.
+		cfg := dnsserver.GetConfig(c)
+		if routes := n.reachableRoutes(cfg.ViewName); len(routes) > 1 {
+			if h := cfg.Handler("cache"); h != nil {
+				log.Warningf("This block can answer a query %d ways (%s) and also loads the cache plugin, which is "+
+					"not profile aware and runs first, so answers will leak between them. Remove the cache plugin "+
+					"from this block and use the nextdns cache option instead, or split the routes across server blocks.",
+					len(routes), strings.Join(routes, ", "))
 			}
 		}
 		return n.OnStartup()
