@@ -287,6 +287,27 @@ func TestServeDNSCacheSeparatesProfiles(t *testing.T) {
 	}
 }
 
+// Capacity is spread across shards, so it has to round up rather than floor —
+// a floor plus a per-shard minimum used to turn "cache 100" into room for 1024.
+func TestStoreCapacity(t *testing.T) {
+	for _, tc := range []struct{ ask, want int }{
+		{10000, 10240}, // 40 per shard, rounded up from 39.06
+		{8192, 8192},   // exact multiple
+		{256, 256},     // exactly one per shard
+		{100, 256},     // below one per shard: floored at the shard count
+		{1, 256},
+	} {
+		if got := newStore(tc.ask).capacity(); got != tc.want {
+			t.Errorf("newStore(%d) capacity = %d, want %d", tc.ask, got, tc.want)
+		}
+	}
+
+	// The old floor of 4 per shard is what made small caches 10x too big.
+	if got := newStore(100).capacity(); got >= 1024 {
+		t.Errorf("newStore(100) capacity = %d, want well under the old 1024", got)
+	}
+}
+
 func TestStoreEviction(t *testing.T) {
 	s := newStore(shards * 4) // 4 entries per shard
 

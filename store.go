@@ -25,17 +25,26 @@ type storeShard struct {
 	size  int
 }
 
+// newStore returns a store holding about capacity entries.
+//
+// Capacity is divided across the shards and rounded up, so the real ceiling is
+// capacity rounded up to a whole number of shards. Since a shard cannot hold
+// less than one entry, a store never holds fewer than `shards` entries however
+// small the requested capacity — asking for 100 gets you 256, not 100.
 func newStore(capacity int) *store {
 	s := &store{}
-	size := capacity / shards
-	if size < 4 {
-		size = 4
+	size := (capacity + shards - 1) / shards
+	if size < 1 {
+		size = 1
 	}
 	for i := range s.shards {
 		s.shards[i] = &storeShard{items: make(map[uint64]*cacheEntry), size: size}
 	}
 	return s
 }
+
+// capacity is the total number of entries this store can hold.
+func (s *store) capacity() int { return s.shards[0].size * shards }
 
 func (s *store) shard(key uint64) *storeShard { return s.shards[key&(shards-1)] }
 
