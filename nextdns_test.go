@@ -22,6 +22,7 @@ import (
 	"github.com/coredns/coredns/request"
 
 	"github.com/miekg/dns"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // capture records what a fake NextDNS endpoint saw.
@@ -593,5 +594,54 @@ func TestInvalidProfileWarningIsPerInstance(t *testing.T) {
 	warn(newTestPlugin(t, c, "default1"))
 	if got := strings.Count(buf.String(), "Ignoring invalid"); got != 2 {
 		t.Errorf("logged %d times across two instances, want 2 — the second instance was silenced by the first", got)
+	}
+}
+
+// An upstream answering a question we did not ask is not usable. It must not
+// reach the cache, and it must be visible — it was previously silent in both
+// logs and metrics.
+func TestServeDNSCountsMismatchedReplies(t *testing.T) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		q := new(dns.Msg)
+		q.Unpack(body)
+
+		// Answer a different question than the one asked.
+		m := new(dns.Msg)
+		m.SetQuestion("somethingelse.example.", dns.TypeA)
+		m.Response = true
+		m.Id = q.Id
+		wire, _ := m.Pack()
+		w.Write(wire)
+	}))
+	defer ts.Close()
+
+	c, err := newDOHClient(dohOptions{endpoints: []string{ts.URL}, timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.hc = ts.Client()
+
+	n := newTestPlugin(t, c, "abc123")
+	n.cache = newMsgCache(100, c)
+
+	before := testutil.ToFloat64(mismatchCount.WithLabelValues(""))
+
+	rec := dnstest.NewRecorder(&test.ResponseWriter{})
+	rcode, err := n.ServeDNS(context.Background(), rec, query("example.org.", dns.TypeA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rcode != dns.RcodeSuccess {
+		t.Errorf("rcode = %d, want success (the response was written here)", rcode)
+	}
+	if rec.Msg == nil || rec.Msg.Rcode != dns.RcodeFormatError {
+		t.Errorf("got %v, want FORMERR", rec.Msg)
+	}
+	if got := testutil.ToFloat64(mismatchCount.WithLabelValues("")) - before; got != 1 {
+		t.Errorf("mismatch counter moved by %v, want 1", got)
+	}
+	if n.cache.c.Len() != 0 {
+		t.Error("a mismatched reply reached the cache")
 	}
 }

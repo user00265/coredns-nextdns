@@ -141,12 +141,14 @@ func (n *NextDNS) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	}
 
 	// A reply that does not answer the question we asked is not usable, and must
-	// never reach the cache.
+	// never reach the cache. Count it: an upstream or an on-path device answering
+	// the wrong question is otherwise invisible in both logs and metrics.
 	if !state.Match(m) {
+		mismatchCount.WithLabelValues(server).Inc()
 		formerr := new(dns.Msg)
 		formerr.SetRcode(r, dns.RcodeFormatError)
 		w.WriteMsg(formerr)
-		return 0, nil
+		return dns.RcodeSuccess, nil
 	}
 
 	if n.cache != nil {

@@ -79,6 +79,13 @@ var (
 		Help:      "Number of client addresses in the reverse DNS discovery table.",
 	})
 
+	mismatchCount = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: plugin.Namespace,
+		Subsystem: pluginName,
+		Name:      "mismatches_total",
+		Help:      "Counter of upstream replies that did not answer the question asked.",
+	}, []string{"server"})
+
 	cacheCollisions = promauto.NewCounter(prometheus.CounterOpts{
 		Namespace: plugin.Namespace,
 		Subsystem: pluginName,
