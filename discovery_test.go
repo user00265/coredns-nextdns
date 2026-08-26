@@ -563,3 +563,92 @@ func TestDiscoveryShutdownUnderLoad(t *testing.T) {
 		d.wait(2 * time.Second) // shutdown may run more than once
 	}
 }
+
+// startPTRServer runs a real DNS server on localhost for the external resolver
+// tests, since externalResolver is otherwise never executed.
+func startPTRServer(t *testing.T, h dns.HandlerFunc) string {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &dns.Server{PacketConn: pc, Handler: h}
+	started := make(chan struct{})
+	srv.NotifyStartedFunc = func() { close(started) }
+	go srv.ActivateAndServe()
+	<-started
+	t.Cleanup(func() { srv.Shutdown() })
+	return pc.LocalAddr().String()
+}
+
+func ptrHandler(rcode int, name string) dns.HandlerFunc {
+	return func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetRcode(r, rcode)
+		if name != "" {
+			rr, _ := dns.NewRR(r.Question[0].Name + " 300 IN PTR " + name)
+			m.Answer = []dns.RR{rr}
+		}
+		w.WriteMsg(m)
+	}
+}
+
+// A resolver answering SERVFAIL has not answered the question; the next
+// configured address must get a turn.
+func TestExternalResolverFailsOverOnBadRcode(t *testing.T) {
+	broken := startPTRServer(t, ptrHandler(dns.RcodeServerFailure, ""))
+	good := startPTRServer(t, ptrHandler(dns.RcodeSuccess, "laptop.lan."))
+
+	resolve := externalResolver([]string{broken, good})
+	name, err := resolve(context.Background(), "5.1.168.192.in-addr.arpa.", nil)
+	if err != nil {
+		t.Fatalf("failover did not happen: %v", err)
+	}
+	if name != "laptop.lan." {
+		t.Errorf("name = %q, want the second resolver's answer", name)
+	}
+}
+
+// NXDOMAIN is a real answer — this address has no name — so it must not fail
+// over to another resolver that might invent one.
+func TestExternalResolverAcceptsNXDOMAIN(t *testing.T) {
+	var secondCalled atomic.Bool
+	nx := startPTRServer(t, ptrHandler(dns.RcodeNameError, ""))
+	second := startPTRServer(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		secondCalled.Store(true)
+		ptrHandler(dns.RcodeSuccess, "invented.lan.")(w, r)
+	})
+
+	resolve := externalResolver([]string{nx, second})
+	name, err := resolve(context.Background(), "5.1.168.192.in-addr.arpa.", nil)
+	if err != nil {
+		t.Fatalf("NXDOMAIN should be an answer, not an error: %v", err)
+	}
+	if name != "" {
+		t.Errorf("name = %q, want none", name)
+	}
+	if secondCalled.Load() {
+		t.Error("failed over past a valid NXDOMAIN")
+	}
+}
+
+func TestExternalResolverAllFail(t *testing.T) {
+	broken := startPTRServer(t, ptrHandler(dns.RcodeServerFailure, ""))
+	resolve := externalResolver([]string{broken})
+	if _, err := resolve(context.Background(), "5.1.168.192.in-addr.arpa.", nil); err == nil {
+		t.Error("expected an error when every resolver fails")
+	}
+}
+
+// internalResolver needs the server on the context; without it upstream.Lookup
+// returns a nil message rather than an error, so ptrName has to catch it.
+func TestInternalResolverWithoutServer(t *testing.T) {
+	resolve := internalResolver()
+	w := discoveryWriter{
+		local:  &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 53},
+		remote: &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1)},
+	}
+	if _, err := resolve(context.Background(), "1.0.0.10.in-addr.arpa.", w); err == nil {
+		t.Error("expected an error with no server on the context")
+	}
+}

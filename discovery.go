@@ -260,6 +260,7 @@ func internalResolver() resolveFunc {
 // zone is served by something CoreDNS itself does not know about.
 func externalResolver(addrs []string) resolveFunc {
 	c := &dns.Client{Net: "udp"}
+	tcp := &dns.Client{Net: "tcp"}
 
 	return func(ctx context.Context, arpa string, _ dns.ResponseWriter) (string, error) {
 		req := new(dns.Msg)
@@ -274,12 +275,19 @@ func externalResolver(addrs []string) resolveFunc {
 				continue
 			}
 			if m.Truncated {
-				tcp := &dns.Client{Net: "tcp"}
 				if m2, _, err := tcp.ExchangeContext(ctx, req, addr); err == nil {
 					m = m2
 				}
 			}
-			return ptrName(m)
+			// A resolver that answers SERVFAIL has not answered the question, so
+			// move on to the next one. ptrName treats a genuine NXDOMAIN as an
+			// answer — this address has no name — and does not fail over on it.
+			name, err := ptrName(m)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			return name, nil
 		}
 		if lastErr == nil {
 			lastErr = errors.New("no resolver answered")
