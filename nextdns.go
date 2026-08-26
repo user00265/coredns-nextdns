@@ -97,11 +97,18 @@ func (n *NextDNS) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	server := metrics.WithServer(ctx)
 
 	// A reverse lookup this plugin issued for device discovery has come back
-	// around through the chain. Nothing ahead of us answered it, so nothing
-	// will: answer it here rather than spending a NextDNS query on the reverse
-	// name of a LAN address, and do not enrich it, which is what would make the
-	// discovery recurse.
+	// around through the chain. Nothing ahead of us answered it, so offer it to
+	// whatever is behind us — a reverse zone is just as legitimately served by a
+	// plugin below this one — but never send it to NextDNS, and never enrich it,
+	// which is what would make the discovery recurse.
 	if isDiscovery(ctx) {
+		rc, err := plugin.NextOrFailure(pluginName, n.Next, ctx, w, r)
+		if err == nil {
+			return rc, nil
+		}
+		// Nothing could answer. Say so here rather than letting the error travel
+		// up, which would have the errors plugin log every retry interval for as
+		// long as the device keeps querying.
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeNameError)
 		w.WriteMsg(m)
@@ -113,15 +120,6 @@ func (n *NextDNS) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		return plugin.NextOrFailure(pluginName, n.Next, ctx, w, r)
 	}
 
-	if n.maxConcurrent > 0 {
-		count := atomic.AddInt64(&n.concurrent, 1)
-		defer atomic.AddInt64(&n.concurrent, -1)
-		if count > n.maxConcurrent {
-			maxConcurrentRejectCount.WithLabelValues(server).Inc()
-			return dns.RcodeRefused, ErrMaxConcurrent
-		}
-	}
-
 	ci := n.devices.lookup(ctx, &state, profile)
 	n.publish(ctx, profile, ci)
 
@@ -131,6 +129,18 @@ func (n *NextDNS) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 			return n.reply(&state, m, server, profile)
 		}
 		cacheMisses.WithLabelValues(server).Inc()
+	}
+
+	// Only the upstream exchange is worth limiting, so the slot is taken after
+	// the cache has had its say. Taking it earlier let a burst of cache hits —
+	// which never touch the upstream — refuse queries servable from memory.
+	if n.maxConcurrent > 0 {
+		count := atomic.AddInt64(&n.concurrent, 1)
+		defer atomic.AddInt64(&n.concurrent, -1)
+		if count > n.maxConcurrent {
+			maxConcurrentRejectCount.WithLabelValues(server).Inc()
+			return dns.RcodeRefused, ErrMaxConcurrent
+		}
 	}
 
 	start := time.Now()

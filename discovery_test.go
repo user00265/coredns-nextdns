@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/pkg/dnstest"
 	"github.com/coredns/coredns/plugin/test"
 	"github.com/coredns/coredns/request"
@@ -282,25 +283,73 @@ func TestDiscoveryOnlyWhenUnnamed(t *testing.T) {
 }
 
 // Without a guard, the reverse lookup would re-enter this plugin, which would
-// try to discover the name of the client that asked it, forever.
-func TestDiscoveryQueryIsNotForwarded(t *testing.T) {
+// try to discover the name of the client that asked it, forever. The guard also
+// keeps these lookups off NextDNS entirely.
+func TestDiscoveryQueryIsNeverSentUpstream(t *testing.T) {
 	c, cap := fakeNextDNS(t, "example.org. 300 IN A 127.0.0.1")
 	n := newTestPlugin(t, c, "abc123")
+	n.Next = nil // nothing behind us, the usual placement
 
 	ctx := withDiscovery(context.Background())
 	rec := dnstest.NewRecorder(&test.ResponseWriter{})
 	rcode, err := n.ServeDNS(ctx, rec, query("5.1.168.192.in-addr.arpa.", dns.TypePTR))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("the error must be absorbed here, or the errors plugin logs every retry: %v", err)
 	}
 	if rcode != dns.RcodeSuccess {
 		t.Errorf("rcode = %d, want success", rcode)
 	}
 	if rec.Msg == nil || rec.Msg.Rcode != dns.RcodeNameError {
-		t.Errorf("got %v, want NXDOMAIN", rec.Msg)
+		t.Errorf("got %v, want NXDOMAIN when nothing can answer", rec.Msg)
 	}
 	if cap.calls.Load() != 0 {
 		t.Error("a discovery lookup was sent to NextDNS")
+	}
+}
+
+// A reverse zone can legitimately be served by a plugin behind this one, so the
+// guard has to offer the query onward rather than swallowing it.
+func TestDiscoveryQueryCanBeAnsweredByNext(t *testing.T) {
+	c, cap := fakeNextDNS(t, "")
+	n := newTestPlugin(t, c, "abc123")
+	n.Next = plugin.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		rr, _ := dns.NewRR(r.Question[0].Name + " 300 IN PTR behind.lan.")
+		m.Answer = []dns.RR{rr}
+		w.WriteMsg(m)
+		return dns.RcodeSuccess, nil
+	})
+
+	rec := dnstest.NewRecorder(&test.ResponseWriter{})
+	if _, err := n.ServeDNS(withDiscovery(context.Background()), rec, query("5.1.168.192.in-addr.arpa.", dns.TypePTR)); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Msg == nil || len(rec.Msg.Answer) != 1 {
+		t.Fatalf("got %v, want the answer from the plugin behind us", rec.Msg)
+	}
+	if ptr, ok := rec.Msg.Answer[0].(*dns.PTR); !ok || ptr.Ptr != "behind.lan." {
+		t.Errorf("got %v, want behind.lan.", rec.Msg.Answer[0])
+	}
+	if cap.calls.Load() != 0 {
+		t.Error("a discovery lookup was sent to NextDNS")
+	}
+}
+
+// A plain rcode from behind us is a real answer and is passed through, so the
+// difference between "no such name" and "resolver broken" stays visible in the
+// discovery metrics.
+func TestDiscoveryQueryPassesThroughNextRcode(t *testing.T) {
+	c, _ := fakeNextDNS(t, "")
+	n := newTestPlugin(t, c, "abc123") // Next is test.ErrorHandler: SERVFAIL, nil error
+
+	rec := dnstest.NewRecorder(&test.ResponseWriter{})
+	rcode, err := n.ServeDNS(withDiscovery(context.Background()), rec, query("5.1.168.192.in-addr.arpa.", dns.TypePTR))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rcode != dns.RcodeServerFailure || rec.Msg.Rcode != dns.RcodeServerFailure {
+		t.Errorf("rcode = %d / msg %v, want the SERVFAIL passed through untouched", rcode, rec.Msg)
 	}
 }
 

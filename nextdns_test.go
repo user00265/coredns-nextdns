@@ -809,3 +809,63 @@ func hostOf(hostport string) string {
 	}
 	return h
 }
+
+// The concurrency limit exists to protect the upstream. A cache hit never
+// reaches it, so a burst of hits must not be refused because slow upstream
+// queries are holding every slot.
+func TestMaxConcurrentDoesNotRefuseCacheHits(t *testing.T) {
+	release := make(chan struct{})
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		q := new(dns.Msg)
+		q.Unpack(body)
+		m := new(dns.Msg)
+		m.SetReply(q)
+		if rr, err := dns.NewRR("cached.example. 300 IN A 127.0.0.1"); err == nil && q.Question[0].Name == "cached.example." {
+			m.Answer = []dns.RR{rr}
+		} else {
+			<-release // everything else stalls, holding a slot
+		}
+		wire, _ := m.Pack()
+		w.Write(wire)
+	}))
+	defer ts.Close()
+	defer close(release)
+
+	c, err := newDOHClient(dohOptions{endpoints: []string{ts.URL}, timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.hc = ts.Client()
+
+	n := newTestPlugin(t, c, "abc123")
+	n.cache = newMsgCache(100, c)
+	n.maxConcurrent = 1
+
+	// Populate the cache with one name.
+	rec := dnstest.NewRecorder(&test.ResponseWriter{})
+	if _, err := n.ServeDNS(context.Background(), rec, query("cached.example.", dns.TypeA)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Saturate the single slot with a stalled upstream query.
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		n.ServeDNS(context.Background(), dnstest.NewRecorder(&test.ResponseWriter{}), query("slow.example.", dns.TypeA))
+	}()
+	<-started
+	for i := 0; i < 200 && atomicLoad(n) == 0; i++ {
+		time.Sleep(time.Millisecond)
+	}
+
+	// The cached name must still be served.
+	rec = dnstest.NewRecorder(&test.ResponseWriter{})
+	rcode, err := n.ServeDNS(context.Background(), rec, query("cached.example.", dns.TypeA))
+	if err != nil {
+		t.Fatalf("cache hit was refused while the limiter was saturated: %v", err)
+	}
+	if rcode != dns.RcodeSuccess || len(rec.Msg.Answer) != 1 {
+		t.Errorf("rcode = %d, msg = %v, want the cached answer", rcode, rec.Msg)
+	}
+}
