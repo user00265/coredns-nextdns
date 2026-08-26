@@ -35,6 +35,16 @@ var defaultEndpoints = []string{
 	"https://dns.nextdns.io#45.90.28.0,2a07:a8c0::,45.90.30.0,2a07:a8c1::",
 }
 
+// wellKnownBootstrap gives the NextDNS hostnames their anycast addresses, so an
+// endpoint written by hostname still reaches NextDNS without a prior DNS
+// lookup. These are the addresses the official nextdns client uses; note dns1
+// and dns2 are deliberately different halves of the set, not the whole of it.
+var wellKnownBootstrap = map[string][]string{
+	"dns.nextdns.io":  {"45.90.28.0", "2a07:a8c0::", "45.90.30.0", "2a07:a8c1::"},
+	"dns1.nextdns.io": {"45.90.28.0", "2a07:a8c0::"},
+	"dns2.nextdns.io": {"45.90.30.0", "2a07:a8c1::"},
+}
+
 // endpoint is one DoH upstream: a base URL plus the literal addresses used to
 // reach it without a prior DNS lookup.
 type endpoint struct {
@@ -123,6 +133,12 @@ type dohClient struct {
 	// change. Anything cached before that timestamp was resolved under the old
 	// configuration and must not be served.
 	lastMod map[string]time.Time
+
+	// bootMu guards bootFailing, which tracks per host whether every bootstrap
+	// address is currently failing. It exists only so that state is logged on
+	// change rather than on every dial.
+	bootMu      sync.Mutex
+	bootFailing map[string]bool
 }
 
 type dohOptions struct {
@@ -138,9 +154,10 @@ func newDOHClient(o dohOptions) (*dohClient, error) {
 		specs = defaultEndpoints
 	}
 	c := &dohClient{
-		timeout:   o.timeout,
-		userAgent: "coredns-nextdns/" + version,
-		lastMod:   map[string]time.Time{},
+		timeout:     o.timeout,
+		userAgent:   "coredns-nextdns/" + version,
+		lastMod:     map[string]time.Time{},
+		bootFailing: map[string]bool{},
 	}
 	if c.timeout <= 0 {
 		c.timeout = defaultTimeout
@@ -149,6 +166,12 @@ func newDOHClient(o dohOptions) (*dohClient, error) {
 		ep, err := parseEndpoint(s)
 		if err != nil {
 			return nil, err
+		}
+		if len(ep.bootstrap) == 0 {
+			// A NextDNS hostname written without bootstrap addresses still gets
+			// them, so the common configuration does not quietly depend on
+			// another resolver. Anything explicit already won.
+			ep.bootstrap = append([]string(nil), wellKnownBootstrap[ep.host]...)
 		}
 		c.endpoints = append(c.endpoints, ep)
 	}
@@ -183,9 +206,18 @@ func newDOHClient(o dohOptions) (*dohClient, error) {
 	return c, nil
 }
 
-// dial resolves the endpoint hostname from the configured bootstrap addresses
-// rather than through the system resolver, falling back to a normal dial when
-// no bootstrap address is configured or all of them fail.
+// dial reaches the endpoint through its configured bootstrap addresses rather
+// than through the system resolver.
+//
+// When an endpoint declares bootstrap addresses and they all fail, this gives
+// up rather than falling back to a hostname dial. The fallback is not a safety
+// net here, it is a trap: on a machine whose resolv.conf points at this very
+// server, resolving the endpoint hostname sends a query back into this plugin,
+// which dials again, and every client query then holds a goroutine and a socket
+// for the whole timeout — at exactly the moment the upstream is already down.
+//
+// A plain dial is still correct for a host that declared nothing, which is all
+// the caller has to go on.
 func (c *dohClient) dial(ctx context.Context, network, addr string) (net.Conn, error) {
 	d := &net.Dialer{Timeout: c.timeout, KeepAlive: defaultKeepalive}
 
@@ -194,26 +226,62 @@ func (c *dohClient) dial(ctx context.Context, network, addr string) (net.Conn, e
 		return d.DialContext(ctx, network, addr)
 	}
 
-	var lastErr error
+	// The transport hands us only host:port, so it cannot say which endpoint the
+	// request belongs to, and two endpoints may legally share a hostname. Take
+	// the union of what every endpoint with this host declared.
+	var (
+		boot     []string
+		declared bool
+	)
 	for _, ep := range c.endpoints {
 		if ep.host != host {
 			continue
 		}
-		for _, ip := range ep.addrs(network) {
-			conn, err := d.DialContext(ctx, network, net.JoinHostPort(ip, port))
-			if err == nil {
-				return conn, nil
-			}
-			lastErr = err
-			bootstrapFailCount.WithLabelValues(ep.host, ip).Inc()
+		if len(ep.bootstrap) > 0 {
+			declared = true
 		}
-		break
+		boot = append(boot, ep.addrs(network)...)
 	}
-	conn, err := d.DialContext(ctx, network, addr)
-	if err != nil && lastErr != nil {
-		return nil, fmt.Errorf("%v (bootstrap: %v)", err, lastErr)
+
+	if !declared {
+		return d.DialContext(ctx, network, addr)
 	}
-	return conn, err
+	if len(boot) == 0 {
+		return nil, fmt.Errorf("no bootstrap address for %s is usable on network %q", host, network)
+	}
+
+	var lastErr error
+	for _, ip := range boot {
+		conn, err := d.DialContext(ctx, network, net.JoinHostPort(ip, port))
+		if err == nil {
+			c.noteBootstrap(host, false, nil)
+			return conn, nil
+		}
+		lastErr = err
+		bootstrapFailCount.WithLabelValues(host, ip).Inc()
+	}
+	c.noteBootstrap(host, true, lastErr)
+
+	return nil, fmt.Errorf("all bootstrap addresses for %s failed, refusing to fall back to the system resolver: %w", host, lastErr)
+}
+
+// noteBootstrap logs a change in whether a host's bootstrap addresses are all
+// failing. Dials are concurrent and frequent, so only transitions are logged.
+func (c *dohClient) noteBootstrap(host string, failing bool, cause error) {
+	c.bootMu.Lock()
+	if c.bootFailing[host] == failing {
+		c.bootMu.Unlock()
+		return
+	}
+	c.bootFailing[host] = failing
+	c.bootMu.Unlock()
+
+	if failing {
+		log.Warningf("Every bootstrap address for %s is failing (%v). Queries will fail until one recovers; "+
+			"falling back to the system resolver is deliberately not done, since it would query this server itself.", host, cause)
+		return
+	}
+	log.Infof("Bootstrap connectivity to %s recovered", host)
 }
 
 // exchange sends r to NextDNS under the given profile and returns the reply.

@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	stdlog "log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -340,22 +342,129 @@ func TestMaxConcurrent(t *testing.T) {
 
 func atomicLoad(n *NextDNS) int64 { return atomic.LoadInt64(&n.concurrent) }
 
-func TestBootstrapDial(t *testing.T) {
-	// A bootstrap address that cannot be reached must not stop the client from
-	// falling back to a normal dial.
+// An endpoint that declared bootstrap addresses must never fall back to a
+// hostname dial when they all fail: on a machine resolving through this server,
+// that fallback queries this server for the endpoint's own name.
+func TestBootstrapDialDoesNotFallBack(t *testing.T) {
+	// A real listener the plain fallback dial would happily have connected to.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+
 	c, err := newDOHClient(dohOptions{
-		endpoints: []string{"https://dns.nextdns.io#203.0.113.1"},
-		timeout:   100 * time.Millisecond,
+		// localhost resolves, and the listener is up — only the bootstrap
+		// address is unreachable.
+		endpoints: []string{"https://localhost:" + port + "#203.0.113.1"},
+		timeout:   200 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	if _, err := c.dial(context.Background(), "tcp", "localhost:"+port); err == nil {
+		t.Fatal("dial succeeded; it fell back to the system resolver instead of failing")
+	} else if !strings.Contains(err.Error(), "refusing to fall back") {
+		t.Errorf("err = %v, want it to name the refused fallback", err)
+	}
+
+	// A host that declared nothing still gets a plain dial — that is all we have.
+	c2, err := newDOHClient(dohOptions{
+		endpoints: []string{"https://localhost:" + port},
+		timeout:   2 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := c2.dial(context.Background(), "tcp", "localhost:"+port)
+	if err != nil {
+		t.Fatalf("host with no bootstrap should still dial normally: %v", err)
+	}
+	conn.Close()
+}
+
+// A NextDNS hostname written without bootstrap addresses still gets them, so
+// the ordinary configuration does not quietly depend on another resolver.
+func TestWellKnownBootstrapIsFilledIn(t *testing.T) {
+	c, err := newDOHClient(dohOptions{endpoints: []string{
+		"https://dns.nextdns.io",
+		"https://dns1.nextdns.io",
+		"https://dns2.nextdns.io",
+		"https://doh.example.org",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string][]string{
+		"dns.nextdns.io":  {"45.90.28.0", "2a07:a8c0::", "45.90.30.0", "2a07:a8c1::"},
+		"dns1.nextdns.io": {"45.90.28.0", "2a07:a8c0::"},
+		"dns2.nextdns.io": {"45.90.30.0", "2a07:a8c1::"},
+		"doh.example.org": nil, // not ours to guess
+	}
+	for _, ep := range c.endpoints {
+		if got := ep.bootstrap; !slices.Equal(got, want[ep.host]) {
+			t.Errorf("%s bootstrap = %v, want %v", ep.host, got, want[ep.host])
+		}
+	}
+
+	// Explicit configuration still wins over the table.
+	c, err = newDOHClient(dohOptions{endpoints: []string{"https://dns.nextdns.io#203.0.113.1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got := c.endpoints[0].bootstrap; len(got) != 1 || got[0] != "203.0.113.1" {
-		t.Fatalf("bootstrap = %v", got)
+		t.Errorf("bootstrap = %v, want the explicitly configured address", got)
 	}
-	if c.endpoints[0].base != "https://dns.nextdns.io" {
-		t.Errorf("base = %q", c.endpoints[0].base)
+}
+
+// Two endpoints may share a hostname; the transport only tells dial the host,
+// so it has to consider every endpoint that could have produced the request.
+func TestBootstrapUnionAcrossSharedHost(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+	host, port, _ := net.SplitHostPort(ln.Addr().String())
+
+	// First endpoint's bootstrap is dead, second endpoint's is the live listener.
+	c, err := newDOHClient(dohOptions{
+		endpoints: []string{
+			"https://localhost:" + port + "#203.0.113.1",
+			"https://localhost:" + port + "/alt#" + host,
+		},
+		timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conn, err := c.dial(context.Background(), "tcp", "localhost:"+port)
+	if err != nil {
+		t.Fatalf("dial failed even though a sibling endpoint listed a working address: %v", err)
+	}
+	conn.Close()
 }
 
 func TestEndpointAddrsFilterByNetwork(t *testing.T) {

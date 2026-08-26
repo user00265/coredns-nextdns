@@ -2,6 +2,7 @@ package nextdns
 
 import (
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -258,19 +259,31 @@ func TestSetupPerEndpointBootstrap(t *testing.T) {
 		}
 	}
 
-	// Unquoted, the suffix is gone by the time the plugin sees it. Nothing can
-	// recover it, so the only guarantee is that it does not become a bogus
-	// address; a startup warning covers the resulting bootstrap-less endpoint.
+	// Unquoted, the suffix is gone by the time the plugin sees it — but for a
+	// NextDNS hostname the well-known table backfills, so the mistake no longer
+	// leaves the endpoint depending on another resolver.
 	n, err = parseNextDNS(caddy.NewTestController("dns",
 		corefile(`endpoint https://dns1.nextdns.io#45.90.28.0`)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := n.client.endpoints[0].base; got != "https://dns1.nextdns.io" {
-		t.Errorf("base = %q", got)
+	ep := n.client.endpoints[0]
+	if ep.base != "https://dns1.nextdns.io" {
+		t.Errorf("base = %q", ep.base)
+	}
+	if !slices.Equal(ep.bootstrap, wellKnownBootstrap["dns1.nextdns.io"]) {
+		t.Errorf("bootstrap = %v, want the well-known addresses to have been filled in", ep.bootstrap)
+	}
+
+	// A host we do not know still ends up with nothing, which the startup
+	// warning reports.
+	n, err = parseNextDNS(caddy.NewTestController("dns",
+		corefile(`endpoint https://doh.example.org#203.0.113.1`)))
+	if err != nil {
+		t.Fatal(err)
 	}
 	if got := n.client.endpoints[0].bootstrap; len(got) != 0 {
-		t.Errorf("bootstrap = %v, want none to have survived", got)
+		t.Errorf("bootstrap = %v, want none for a host we cannot guess", got)
 	}
 }
 
