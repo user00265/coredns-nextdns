@@ -30,6 +30,14 @@ func setup(c *caddy.Controller) error {
 		return n
 	})
 
+	// Gauge labels are captured here rather than at parse time: the view name is
+	// only filled in once MakeServers has run, which is after every plugin's
+	// setup and before any startup callback.
+	c.OnStartup(func() error {
+		n.setMetricLabels(metricLabelsFor(dnsserver.GetConfig(c)))
+		return nil
+	})
+
 	c.OnStartup(func() error {
 		// The cache plugin keys on the question only, and it runs ahead of this
 		// one, so when a block can answer the same question more than one way it
@@ -51,9 +59,33 @@ func setup(c *caddy.Controller) error {
 		}
 		return n.OnStartup()
 	})
+	// A successful reload starts the new instance before stopping the old one,
+	// so a delete in OnShutdown would remove the series the new instance had
+	// just written. OnRestart runs on the old instance before the new one
+	// exists, which is the moment that is actually safe.
+	c.OnRestart(func() error {
+		n.deleteGauges()
+		return nil
+	})
+	// ...and if the reload is abandoned, this instance carries on serving, so
+	// it has to put its series back.
+	c.OnRestartFailed(func() error {
+		n.republishGauges()
+		return nil
+	})
 	c.OnShutdown(n.OnShutdown)
 
 	return nil
+}
+
+// metricLabelsFor derives an instance's gauge labels from its server config,
+// the same way the metrics plugin builds the labels for coredns_plugin_enabled.
+func metricLabelsFor(cfg *dnsserver.Config) metricLabels {
+	l := metricLabels{zone: cfg.Zone, view: cfg.ViewName}
+	for _, h := range cfg.ListenHosts {
+		l.servers = append(l.servers, cfg.Transport+"://"+net.JoinHostPort(h, cfg.Port))
+	}
+	return l
 }
 
 // profileRe is deliberately permissive: NextDNS profile IDs are short

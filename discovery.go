@@ -76,6 +76,7 @@ type discoveryEntry struct {
 // discoverer keeps a small expiring table of client address to device name.
 type discoverer struct {
 	resolve resolveFunc
+	labels  metricLabels
 	ttl     time.Duration
 	retry   time.Duration
 	timeout time.Duration
@@ -207,7 +208,7 @@ func (d *discoverer) store(addr netip.Addr, name string, ttl time.Duration) {
 	n := len(d.entries)
 	d.mu.Unlock()
 
-	discoveryEntries.Set(float64(n))
+	d.labels.set(discoveryEntries, float64(n))
 }
 
 // wait blocks until the in-flight lookups finish, or until max elapses. The

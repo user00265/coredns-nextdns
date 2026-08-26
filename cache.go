@@ -27,6 +27,7 @@ import (
 type msgCache struct {
 	c      *store
 	client *dohClient
+	labels metricLabels
 
 	minTTL time.Duration
 	maxTTL time.Duration
@@ -172,7 +173,7 @@ func (mc *msgCache) put(profile string, state *request.Request, m *dns.Msg) {
 		do:      state.Do(),
 		cd:      state.Req.CheckingDisabled,
 	})
-	cacheSize.Set(float64(mc.c.Len()))
+	mc.labels.set(cacheSize, float64(mc.c.Len()))
 }
 
 // setTTL rewrites every record TTL to ttl, leaving OPT alone: its TTL field

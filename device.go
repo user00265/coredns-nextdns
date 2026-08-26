@@ -97,6 +97,9 @@ type deviceDB struct {
 	files     []*deviceFile
 	discovery *discoverer
 
+	// labels identify this instance in the gauges it writes; see metricLabels.
+	labels metricLabels
+
 	mu      sync.RWMutex
 	learned map[netip.Addr]deviceInfo
 	// bindings remembers the MAC last seen for an address, and unlike learned it
@@ -362,7 +365,7 @@ func (d *deviceDB) refresh() {
 	}
 	d.mu.Unlock()
 
-	devicesKnown.Set(float64(len(learned)))
+	d.labels.set(devicesKnown, float64(len(learned)))
 }
 
 // logChanged reports err for source, but only when it differs from the previous

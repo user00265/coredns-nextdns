@@ -68,6 +68,9 @@ type NextDNS struct {
 	devices *deviceDB
 	cache   *msgCache
 
+	// labels identify this instance in the gauges it writes; see metricLabels.
+	labels metricLabels
+
 	// badProfile bounds the warning for an invalid profile from metadata: the
 	// value is set per query, so logging every occurrence would let a
 	// misbehaving plugin flood the log. Per instance rather than per process,
@@ -297,6 +300,48 @@ func (n *NextDNS) reachableRoutes(view string) []string {
 		add(cp.profile)
 	}
 	return out
+}
+
+// setMetricLabels gives this instance, and everything under it that writes a
+// gauge, the labels identifying it. Called before OnStartup so the first
+// refresh already writes under them.
+func (n *NextDNS) setMetricLabels(l metricLabels) {
+	n.labels = l
+	n.devices.labels = l
+	if n.devices.discovery != nil {
+		n.devices.discovery.labels = l
+	}
+	if n.cache != nil {
+		n.cache.labels = l
+	}
+}
+
+// deleteGauges removes this instance's gauge series. A reload replaces the
+// instance, and a block that goes away entirely should not leave a frozen
+// value behind.
+func (n *NextDNS) deleteGauges() {
+	n.labels.delete(devicesKnown)
+	n.labels.delete(discoveryEntries)
+	n.labels.delete(cacheSize)
+}
+
+// republishGauges rewrites this instance's current values, for when a reload
+// was abandoned after deleteGauges already ran and this instance keeps serving.
+func (n *NextDNS) republishGauges() {
+	n.devices.mu.RLock()
+	known := len(n.devices.learned)
+	n.devices.mu.RUnlock()
+	n.labels.set(devicesKnown, float64(known))
+
+	if d := n.devices.discovery; d != nil {
+		d.mu.Lock()
+		entries := len(d.entries)
+		d.mu.Unlock()
+		n.labels.set(discoveryEntries, float64(entries))
+	}
+	if n.cache != nil {
+		n.labels.set(cacheSize, float64(n.cache.c.Len()))
+	}
 }
 
 // OnStartup starts the background device discovery refresh.
