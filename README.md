@@ -114,17 +114,36 @@ keep the set of profiles bounded; each distinct one is a time series.
 | Option | Default | |
 | --- | --- | --- |
 | `endpoint URL...` | NextDNS anycast | Tried in order. |
-| `bootstrap IP...` | `45.90.28.0,2a07:a8c0::,45.90.30.0,2a07:a8c1::` | Applied to endpoints without their own. |
+| `bootstrap IP...` | see below | Applied to endpoints that do not carry their own. |
 | `tls_servername NAME` | from URL | Name verified in the certificate. |
 | `timeout DURATION` | `5s` | Whole query, failover included. |
 | `max_idle_conns N` | `16` | Connection pool size. |
 | `max_concurrent N` | off | REFUSED past N in-flight queries. |
 
-An endpoint can carry bootstrap addresses after a `#` — **quote it**, or the Corefile treats the `#`
-as a comment and you silently get an endpoint with no bootstrap:
+A NextDNS hostname that ends up with no bootstrap addresses is filled in from the ones the official
+`nextdns` client uses — all four anycast addresses for `dns.nextdns.io`, and the matching half of the
+set for `dns1.nextdns.io` and `dns2.nextdns.io`. The ordinary configuration therefore never depends
+on another resolver, and `bootstrap` is only needed for an endpoint that is not NextDNS.
+
+An endpoint can also carry its own addresses after a `#`. **Quote it** — a Corefile treats an
+unquoted `#` as a comment, so the suffix is gone before the plugin sees it:
 
 ```corefile
 endpoint "https://dns1.nextdns.io#45.90.28.0" "https://dns2.nextdns.io#45.90.30.0"
+```
+
+When every bootstrap address for a host is failing, queries to it fail. The plugin deliberately does
+*not* fall back to resolving the endpoint's hostname: on a machine that resolves through this server,
+that fallback asks this server for the endpoint's own name, and every client query then holds a
+goroutine and a socket for the whole timeout — precisely when the upstream is already down. The
+transition is logged once, and `coredns_nextdns_bootstrap_failures_total` counts the failed dials.
+
+If you point a NextDNS hostname somewhere else in `/etc/hosts` on purpose, give the address directly
+instead and keep certificate verification:
+
+```corefile
+endpoint https://45.90.28.0
+tls_servername dns.nextdns.io
 ```
 
 Redirects are never followed: Go copies custom headers across a redirect to a different host, which
@@ -134,7 +153,7 @@ would leak the device identity.
 
 | Option | Default | |
 | --- | --- | --- |
-| `cache [CAPACITY]` | off; `10000` when on | Profile-aware response cache. |
+| `cache [CAPACITY]` | off; `10000` when on | Profile-aware response cache. Capacity is spread over 256 shards and rounded up, so it never holds fewer than 256 entries. |
 | `cache_ttl MIN MAX` | `5s 1h` | Clamp on entry lifetime. |
 
 The stock *cache* plugin keys on the question alone, which is fine when a block resolves to one
@@ -155,9 +174,15 @@ whatever the first client to ask got, on whatever profile. CoreDNS warns at star
 The built-in cache also drops a profile's entries when NextDNS reports its configuration changed, so
 blocklist edits apply without waiting out TTLs.
 
-Neither cache is keyed on the device, so per-device NextDNS settings within one profile won't work
-with caching on — the first device to ask answers for all of them. Turn caching off for a profile
+Either way, a cached answer means NextDNS never sees the query — no log entry, no analytics, no
+device attribution. Caching trades away some of the visibility this plugin exists to provide, so pick
+the TTL knowing that.
+
+Neither cache is keyed on the device either, so per-device NextDNS settings within one profile won't
+work with caching on: the first device to ask answers for all of them. Turn caching off for a profile
 whose policy varies by device.
+
+`cache_ttl` without `cache` is a configuration error rather than a line that parses and does nothing.
 
 ### Device discovery by reverse DNS
 
@@ -165,7 +190,7 @@ whose policy varies by device.
 | --- | --- | --- |
 | `discovery internal\|ADDR...` | off | `internal` resolves through CoreDNS itself; addresses are queried directly, port 53 by default. |
 | `discovery_ttl DURATION` | `1h` | Lifetime of a discovered name. |
-| `discovery_retry DURATION` | `5m` | Delay before retrying an address with no PTR. |
+| `discovery_retry DURATION` | `5m` | Delay before retrying an address that produced no name — no PTR record, a resolver error, or a failed lookup. |
 | `discovery_timeout DURATION` | `2s` | One lookup. |
 | `discovery_max N` | `4096` | Table cap. |
 
@@ -176,8 +201,11 @@ Lookups run asynchronously, so a device's first query goes out unnamed and the n
 second. They also can't recurse: a lookup is marked on its context, and a marked query is never
 enriched or sent to NextDNS.
 
-That last part is the catch with `internal` — something *ahead* of `nextdns` has to answer the
-reverse zone, or the lookup gets NXDOMAIN from this plugin:
+With `internal`, something else in the chain has to answer the reverse zone — either ahead of
+`nextdns` or behind it, since the lookup is offered onward before this plugin gives up. If nothing
+answers it gets NXDOMAIN from here, cached for `discovery_retry`. A plugin placed *behind* `nextdns`
+will see these reverse queries for your LAN addresses, so don't put a public forwarder there unless
+you mean to:
 
 ```corefile
 . {
@@ -205,12 +233,15 @@ nextdns abc123 {
 | `device_model MODEL` | MAC vendor prefix | Fixed model for every device. Quote it if it has spaces. |
 | `device_name IP NAME` | — | Pin a name. Repeatable; always wins. |
 | `device_names FORMAT PATH` | — | `dnsmasq`, `dhcpd` or `hosts` file. Repeatable. |
-| `arp [PATH]` | `/proc/net/arp` | Kernel ARP table. Linux, same segment only. |
-| `reload DURATION` | `30s` | Re-read interval for files and ARP. |
+| `arp [PATH]` | `/proc/net/arp` | Kernel ARP table. Linux, same segment, IPv4 only. |
+| `reload DURATION` | `30s` | Re-read interval for files and ARP. An error without a source to re-read. |
 
 A DNS query carries no device identity; all a plugin gets is the client address. Everything here is
 an out-of-band lookup on that address. Names resolve in the order `device_name`, `device_names`,
 `discovery`.
+
+The `dnsmasq` and `dhcpd` formats read IPv4 leases, and `arp` reads the IPv4 neighbour table, so an
+IPv6-only client takes its name from `device_name` or `discovery` and gets an IP-derived device ID.
 
 `device_names` and `arp` read local state, so they only apply where CoreDNS has it — the lease file
 on the same filesystem, or the client's own L2 segment. They're worth using where you have them,
@@ -260,7 +291,13 @@ exists for when you'd rather write the config once:
 }
 ```
 
-Each block gets its own instance and its own cache, so the stock *cache* plugin is fine here.
+Each block gets its own instance and its own cache, so the stock *cache* plugin is fine here — a
+block bound to a view can only reach that view's profile, and the startup warning knows it.
+
+That warning counts the routes a block can actually take, and a `-` passthrough counts as one: those
+clients get an unfiltered answer, which a question-keyed cache will hand to everyone else. It cannot
+see a profile supplied at request time through `nextdns/profile`, so if you route that way, keep the
+*cache* plugin out of the block yourself.
 
 ### Metadata
 
@@ -276,18 +313,19 @@ log . "{remote} {name} {type} -> {/nextdns/profile-used} {/nextdns/device-name} 
 
 | Metric | Labels |
 | --- | --- |
-| `coredns_nextdns_request_duration_seconds` | `server`, `profile` |
+| `coredns_nextdns_request_duration_seconds` | `server`, `profile` — the upstream exchange only, so cache hits are not in it |
 | `coredns_nextdns_responses_total` | `server`, `profile`, `rcode` |
 | `coredns_nextdns_errors_total` | `endpoint` |
 | `coredns_nextdns_bootstrap_failures_total` | `endpoint`, `address` |
 | `coredns_nextdns_max_concurrent_rejects_total` | `server` |
 | `coredns_nextdns_cache_hits_total`, `coredns_nextdns_cache_misses_total` | `server` |
-| `coredns_nextdns_cache_entries` | |
+| `coredns_nextdns_cache_entries` | `server`, `zone`, `view` |
 | `coredns_nextdns_cache_collisions_total` | should stay zero |
 | `coredns_nextdns_invalid_profiles_total` | |
+| `coredns_nextdns_mismatches_total` | `server` — upstream replies that did not answer the question |
 | `coredns_nextdns_discovery_lookups_total` | `result`: `found`, `notfound`, `error`, `panic` |
-| `coredns_nextdns_discovery_entries` | |
-| `coredns_nextdns_devices_known` | |
+| `coredns_nextdns_discovery_entries` | `server`, `zone`, `view` |
+| `coredns_nextdns_devices_known` | `server`, `zone`, `view` |
 
 ### Example
 

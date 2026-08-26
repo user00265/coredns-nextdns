@@ -1,17 +1,21 @@
 # Resolve through NextDNS, naming devices from the network's reverse zone.
 #
-# This assumes nothing about where CoreDNS runs — only that 192.168.1.1 can
-# answer PTR for your client subnet. Replace it with whatever serves your
-# reverse zone, or use "discovery internal" if this CoreDNS already does.
+# This assumes nothing about where CoreDNS runs — only that 10.0.0.1 can answer
+# PTR for your client subnet. Replace it with whatever serves your reverse zone,
+# or use "discovery internal" if this CoreDNS already does.
 #
 # Run with: coredns -conf Corefile.example
 
 .:53 {
     metadata
+
+    # Caching is a trade: a cached answer never reaches NextDNS, so it produces
+    # no log entry and no device attribution there. Drop this line if you want
+    # every query attributed, or keep it and accept the gap.
     cache 3600
 
     nextdns abc123 {
-        discovery 192.168.1.1
+        discovery 10.0.0.1
 
         # Devices reverse DNS does not name usefully.
         device_name 10.0.0.31 Living-Room-TV
