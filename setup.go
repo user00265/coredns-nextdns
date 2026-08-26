@@ -95,15 +95,18 @@ func parseNextDNS(c *caddy.Controller) (*NextDNS, error) {
 
 		doh = dohOptions{timeout: defaultTimeout}
 
-		cacheOn  bool
-		cacheCap int
-		cacheMin = defaultCacheMinTTL
-		cacheMax = defaultCacheMaxTTL
+		cacheOn    bool
+		cacheTTLOn bool
+		cacheCap   int
+		cacheMin   = defaultCacheMinTTL
+		cacheMax   = defaultCacheMaxTTL
 
 		// Tuning is collected as pointers so that it can be applied after the
 		// whole block is read, and the options may appear in any order.
 		discoveryTTL, discoveryRetry, discoveryTimeout *time.Duration
 		discoveryMax                                   *int
+
+		reloadOn bool
 	)
 
 	for c.Next() {
@@ -227,7 +230,7 @@ func parseNextDNS(c *caddy.Controller) (*NextDNS, error) {
 				if lo < 0 || hi < lo {
 					return nil, c.Errf("cache_ttl needs 0 <= minimum <= maximum")
 				}
-				cacheMin, cacheMax = lo, hi
+				cacheMin, cacheMax, cacheTTLOn = lo, hi, true
 
 			case "device_id":
 				if !c.NextArg() {
@@ -363,7 +366,7 @@ func parseNextDNS(c *caddy.Controller) (*NextDNS, error) {
 				if d <= 0 {
 					return nil, c.Errf("reload must be a positive duration")
 				}
-				n.devices.reload = d
+				n.devices.reload, reloadOn = d, true
 
 			default:
 				return nil, c.Errf("unknown property %q", c.Val())
@@ -373,6 +376,16 @@ func parseNextDNS(c *caddy.Controller) (*NextDNS, error) {
 
 	if n.profile == "" {
 		return nil, errors.New("a profile ID is required")
+	}
+
+	// Options that only tune a feature are an error without it, the same way the
+	// discovery_* options are below. Accepting them silently hides a typo behind
+	// a server that starts and then does not do what the Corefile says.
+	if cacheTTLOn && !cacheOn {
+		return nil, errors.New("cache_ttl needs cache to be enabled")
+	}
+	if reloadOn && len(n.devices.files) == 0 && !n.devices.useARP {
+		return nil, errors.New("reload has nothing to re-read: it needs device_names or arp")
 	}
 
 	if d := n.devices.discovery; d != nil {

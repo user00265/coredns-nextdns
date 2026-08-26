@@ -92,6 +92,7 @@ func TestSetupOptions(t *testing.T) {
 		device_id ip
 		device_ip false
 		device_name 192.168.1.5 Bobs-iPhone
+		arp
 		reload 1m
 	}`))
 	if err != nil {
@@ -307,6 +308,31 @@ func TestSetupDeviceModelValidation(t *testing.T) {
 	for _, model := range []string{"bad\nvalue", "bad\rvalue", strings.Repeat("x", 200)} {
 		if _, err := parseNextDNS(caddy.NewTestController("dns", corefile(`device_model "`+model+`"`))); err == nil {
 			t.Errorf("device_model %q was accepted", model)
+		}
+	}
+}
+
+// Options that only tune a feature must be rejected without it, so a typo does
+// not hide behind a server that starts and quietly ignores the line.
+func TestSetupTuningNeedsItsFeature(t *testing.T) {
+	for _, options := range [][]string{
+		{`cache_ttl 30s 10m`},                   // no cache
+		{`reload 10s`},                          // no device_names, no arp
+		{`device_name 10.0.0.1 x`, `reload 1m`}, // device_name is static, nothing to re-read
+	} {
+		if _, err := parseNextDNS(caddy.NewTestController("dns", corefile(options...))); err == nil {
+			t.Errorf("expected an error for %v", options)
+		}
+	}
+
+	// ...and accepted with it.
+	for _, options := range [][]string{
+		{`cache 1024`, `cache_ttl 30s 10m`},
+		{`arp`, `reload 10s`},
+		{`device_names hosts /tmp/x`, `reload 10s`},
+	} {
+		if _, err := parseNextDNS(caddy.NewTestController("dns", corefile(options...))); err != nil {
+			t.Errorf("%v rejected: %v", options, err)
 		}
 	}
 }
