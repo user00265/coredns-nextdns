@@ -154,13 +154,16 @@ func (n *NextDNS) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	return n.reply(&state, m, server, profile)
 }
 
-// reply sizes m for the client and writes it out.
+// reply writes m out as the answer to state.
+//
+// It does not size or truncate: the server hands every plugin a writer already
+// wrapped in request.NewScrubWriter, which does both on the way out. Restoring
+// the ID is still ours to do — the query goes upstream with ID 0, and nothing
+// downstream puts the client's back.
 func (n *NextDNS) reply(state *request.Request, m *dns.Msg, server, profile string) (int, error) {
 	responseCount.WithLabelValues(server, profile, rcode.ToString(m.Rcode)).Inc()
 
 	m.Id = state.Req.Id
-	state.SizeAndDo(m)
-	m = state.Scrub(m)
 	state.W.WriteMsg(m)
 	return dns.RcodeSuccess, nil
 }

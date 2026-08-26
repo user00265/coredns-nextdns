@@ -2,6 +2,7 @@ package nextdns
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -502,5 +503,59 @@ func TestMetadataProfileIsValidated(t *testing.T) {
 		if got := n.profileFor(ctx, state); got != good {
 			t.Errorf("profile %q = %q, want it honoured", good, got)
 		}
+	}
+}
+
+// reply no longer sizes or truncates: the server wraps every plugin's writer in
+// a ScrubWriter that does both. Restoring the client's ID is still this
+// plugin's job, because the query goes upstream with ID 0.
+func TestServeDNSLeavesScrubbingToTheServer(t *testing.T) {
+	// An answer comfortably over the 512 byte limit a bare UDP client advertises.
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		q := new(dns.Msg)
+		if err := q.Unpack(body); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		m := new(dns.Msg)
+		m.SetReply(q)
+		for i := 0; i < 40; i++ {
+			rr, err := dns.NewRR(fmt.Sprintf("big.example. 300 IN A 10.0.%d.%d", i/256, i%256))
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			m.Answer = append(m.Answer, rr)
+		}
+		wire, _ := m.Pack()
+		w.Write(wire)
+	}))
+	defer ts.Close()
+
+	c, err := newDOHClient(dohOptions{endpoints: []string{ts.URL}, timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.hc = ts.Client()
+	n := newTestPlugin(t, c, "abc123")
+
+	q := query("big.example.", dns.TypeA)
+	q.Id = 4242
+
+	// The server hands plugins a ScrubWriter; reproduce that here.
+	rec := dnstest.NewRecorder(&test.ResponseWriter{})
+	if _, err := n.ServeDNS(context.Background(), request.NewScrubWriter(q, rec), q); err != nil {
+		t.Fatal(err)
+	}
+
+	if rec.Msg.Id != 4242 {
+		t.Errorf("reply ID = %d, want the client's 4242", rec.Msg.Id)
+	}
+	if !rec.Msg.Truncated {
+		t.Error("oversized reply was not truncated; the server's ScrubWriter should have done it")
+	}
+	if size := rec.Msg.Len(); size > 512 {
+		t.Errorf("reply is %d bytes, want it scrubbed to the client's 512 byte buffer", size)
 	}
 }
