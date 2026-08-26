@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/metadata"
 	"github.com/coredns/coredns/plugin/pkg/dnstest"
@@ -210,8 +211,7 @@ func TestProfileSelection(t *testing.T) {
 	}
 
 	// A view overrides the client subnet.
-	ctx := metadata.ContextWithMetadata(context.Background())
-	metadata.SetValueFunc(ctx, "view/name", func() string { return "guests" })
+	ctx := withView(metadata.ContextWithMetadata(context.Background()), "guests")
 	if got := n.profileFor(ctx, state); got != "guests1" {
 		t.Errorf("profile = %q, want guests1", got)
 	}
@@ -223,8 +223,7 @@ func TestProfileSelection(t *testing.T) {
 	}
 
 	// An unknown view falls through to the client subnet rules.
-	ctx2 := metadata.ContextWithMetadata(context.Background())
-	metadata.SetValueFunc(ctx2, "view/name", func() string { return "nosuchview" })
+	ctx2 := withView(context.Background(), "nosuchview")
 	if got := n.profileFor(ctx2, state); got != "host111" {
 		t.Errorf("profile = %q, want host111", got)
 	}
@@ -244,8 +243,7 @@ func TestPassthroughProfile(t *testing.T) {
 		return dns.RcodeSuccess, nil
 	})
 
-	ctx := metadata.ContextWithMetadata(context.Background())
-	metadata.SetValueFunc(ctx, "view/name", func() string { return "internal" })
+	ctx := withView(context.Background(), "internal")
 
 	rec := dnstest.NewRecorder(&test.ResponseWriter{})
 	if _, err := n.ServeDNS(ctx, rec, query("internal.example.", dns.TypeA)); err != nil {
@@ -868,4 +866,10 @@ func TestMaxConcurrentDoesNotRefuseCacheHits(t *testing.T) {
 	if rcode != dns.RcodeSuccess || len(rec.Msg.Answer) != 1 {
 		t.Errorf("rcode = %d, msg = %v, want the cached answer", rcode, rec.Msg)
 	}
+}
+
+// withView puts a view name on the context the way the DNS server does when a
+// block is bound to a view.
+func withView(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, dnsserver.ViewKey{}, name)
 }

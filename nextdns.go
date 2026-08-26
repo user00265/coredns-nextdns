@@ -106,7 +106,9 @@ func (n *NextDNS) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	// which is what would make the discovery recurse.
 	if isDiscovery(ctx) {
 		rc, err := plugin.NextOrFailure(pluginName, n.Next, ctx, w, r)
-		if err == nil {
+		if err == nil || plugin.ClientWrite(rc) {
+			// It answered, or it wrote a response of its own; either way the
+			// query is dealt with and there is nothing here to add.
 			return rc, nil
 		}
 		// Nothing could answer. Say so here rather than letting the error travel
@@ -208,7 +210,7 @@ func (n *NextDNS) profileFor(ctx context.Context, state *request.Request) string
 	}
 
 	if len(n.viewProfiles) > 0 {
-		if v := viewName(ctx); v != "" {
+		if v := metrics.WithView(ctx); v != "" {
 			if p, ok := n.viewProfiles[v]; ok {
 				return p
 			}
@@ -226,20 +228,6 @@ func (n *NextDNS) profileFor(ctx context.Context, state *request.Request) string
 	}
 
 	return n.profile
-}
-
-// viewName returns the name of the view handling this query, if any. The view
-// name is put on the context by the DNS server itself, so this works whether or
-// not the metadata plugin is enabled; the metadata label is the fallback for
-// anything else that wants to name a view.
-func viewName(ctx context.Context) string {
-	if v := metrics.WithView(ctx); v != "" {
-		return v
-	}
-	if f := metadata.ValueFunc(ctx, "view/name"); f != nil {
-		return f()
-	}
-	return ""
 }
 
 // publish exposes what this plugin decided about the query to other plugins
@@ -274,10 +262,11 @@ func (n *NextDNS) publish(ctx context.Context, profile string, ci ClientInfo) {
 //
 // view is the name of the view bound to this block, empty if it has none.
 // CoreDNS binds at most one view per block and sets it on every query the block
-// handles, so when that view names a profile it is the only profile reachable
-// here and the other view_profile entries are dead config. They are excluded
-// rather than counted, which is what makes a shared snippet imported into
-// several view blocks come out single-routed.
+// handles, and the view a query is matched against comes from nowhere else — so
+// when that view names a profile it is the only profile reachable here, and the
+// other view_profile entries are dead config. Excluding them rather than
+// counting them is what makes a shared snippet imported into several view
+// blocks come out single-routed, and it is exact rather than a guess.
 func (n *NextDNS) reachableRoutes(view string) []string {
 	if view != "" {
 		if p, ok := n.viewProfiles[view]; ok {

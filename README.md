@@ -295,9 +295,12 @@ Each block gets its own instance and its own cache, so the stock *cache* plugin 
 block bound to a view can only reach that view's profile, and the startup warning knows it.
 
 That warning counts the routes a block can actually take, and a `-` passthrough counts as one: those
-clients get an unfiltered answer, which a question-keyed cache will hand to everyone else. It cannot
-see a profile supplied at request time through `nextdns/profile`, so if you route that way, keep the
-*cache* plugin out of the block yourself.
+clients get an unfiltered answer, which a question-keyed cache will hand to everyone else. The one
+thing it cannot see is a profile supplied at request time through the `nextdns/profile` metadata
+label — if you route that way, keep the *cache* plugin out of the block yourself.
+
+`view_profile` matches the view CoreDNS bound to the block, and nothing else names a view, so a block
+with no `view` directive never reaches its `view_profile` entries.
 
 ### Metadata
 
