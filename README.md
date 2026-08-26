@@ -318,10 +318,10 @@ I agreed with the output.
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Copyright (c) 2026 user00265.
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 Elisamuel Resto Donate <sam@samresto.dev>.
 
-This plugin is **not part of the CoreDNS codebase**. It's a separate project with its own maintainer,
-and the CoreDNS project isn't responsible for it. Please send any issues, questions or pull requests
+This plugin is **not part of the CoreDNS codebase**. It's a separate project with its own author, and
+the CoreDNS project isn't responsible for it. Please send any issues, questions or pull requests
 about this plugin to <https://github.com/user00265/coredns-nextdns>, not to CoreDNS.
 
 ## Acknowledgements
