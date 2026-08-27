@@ -25,7 +25,7 @@ func lookupIP(d *deviceDB, ip, profile string) ClientInfo {
 		remote: &net.UDPAddr{IP: net.ParseIP(ip), Port: 40000},
 	}
 	state := &request.Request{W: w, Req: query("example.org.", dns.TypeA)}
-	return d.lookup(context.Background(), state, profile)
+	return d.lookup(context.Background(), state, profile, true)
 }
 
 // stubResolver is a resolveFunc that records what it was asked and answers from
@@ -89,12 +89,12 @@ func TestDiscoveryIsAsynchronous(t *testing.T) {
 	s := &stubResolver{names: map[string]string{"5.1.168.192.in-addr.arpa.": "laptop.lan."}}
 	d := newTestDiscoverer(s)
 
-	if got := d.name(context.Background(), addr("192.168.1.5"), testLocal); got != "" {
+	if got := d.name(context.Background(), addr("192.168.1.5"), testLocal, true); got != "" {
 		t.Errorf("cold miss returned %q, want nothing while the lookup runs", got)
 	}
 	settle(t, d)
 
-	if got := d.name(context.Background(), addr("192.168.1.5"), testLocal); got != "laptop.lan." {
+	if got := d.name(context.Background(), addr("192.168.1.5"), testLocal, true); got != "laptop.lan." {
 		t.Errorf("warm lookup = %q, want laptop.lan.", got)
 	}
 	if s.calls.Load() != 1 {
@@ -109,7 +109,7 @@ func TestDiscoveryDoesNotBlock(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		d.name(context.Background(), addr("192.168.1.5"), testLocal)
+		d.name(context.Background(), addr("192.168.1.5"), testLocal, true)
 		close(done)
 	}()
 
@@ -133,7 +133,7 @@ func TestDiscoverySingleFlight(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			d.name(context.Background(), addr("192.168.1.5"), testLocal)
+			d.name(context.Background(), addr("192.168.1.5"), testLocal, true)
 		}()
 	}
 	wg.Wait()
@@ -149,9 +149,9 @@ func TestDiscoveryExpiry(t *testing.T) {
 	s := &stubResolver{names: map[string]string{"5.1.168.192.in-addr.arpa.": "laptop.lan."}}
 	d := newTestDiscoverer(s)
 
-	d.name(context.Background(), addr("192.168.1.5"), testLocal)
+	d.name(context.Background(), addr("192.168.1.5"), testLocal, true)
 	settle(t, d)
-	if got := d.name(context.Background(), addr("192.168.1.5"), testLocal); got != "laptop.lan." {
+	if got := d.name(context.Background(), addr("192.168.1.5"), testLocal, true); got != "laptop.lan." {
 		t.Fatalf("got %q, want the cached name", got)
 	}
 
@@ -162,7 +162,7 @@ func TestDiscoveryExpiry(t *testing.T) {
 
 	// An expired entry is still served while its refresh runs, rather than the
 	// device losing its name for the duration of a lookup.
-	if got := d.name(context.Background(), addr("192.168.1.5"), testLocal); got != "laptop.lan." {
+	if got := d.name(context.Background(), addr("192.168.1.5"), testLocal, true); got != "laptop.lan." {
 		t.Errorf("got %q during refresh, want the stale name", got)
 	}
 	settle(t, d)
@@ -178,7 +178,7 @@ func TestDiscoveryNegativeResultIsCached(t *testing.T) {
 	d.retry = time.Hour
 
 	for i := 0; i < 5; i++ {
-		d.name(context.Background(), addr("192.168.1.9"), testLocal)
+		d.name(context.Background(), addr("192.168.1.9"), testLocal, true)
 		settle(t, d)
 	}
 	if got := s.calls.Load(); got != 1 {
@@ -189,7 +189,7 @@ func TestDiscoveryNegativeResultIsCached(t *testing.T) {
 	d.mu.Lock()
 	d.entries[addr("192.168.1.9")] = discoveryEntry{expires: time.Now().Add(-time.Second)}
 	d.mu.Unlock()
-	d.name(context.Background(), addr("192.168.1.9"), testLocal)
+	d.name(context.Background(), addr("192.168.1.9"), testLocal, true)
 	settle(t, d)
 	if got := s.calls.Load(); got != 2 {
 		t.Errorf("resolver called %d times, want a retry after the interval", got)
@@ -200,10 +200,10 @@ func TestDiscoveryResolverError(t *testing.T) {
 	s := &stubResolver{err: errors.New("boom")}
 	d := newTestDiscoverer(s)
 
-	d.name(context.Background(), addr("192.168.1.5"), testLocal)
+	d.name(context.Background(), addr("192.168.1.5"), testLocal, true)
 	settle(t, d)
 
-	if got := d.name(context.Background(), addr("192.168.1.5"), testLocal); got != "" {
+	if got := d.name(context.Background(), addr("192.168.1.5"), testLocal, true); got != "" {
 		t.Errorf("got %q, want no name after a failed lookup", got)
 	}
 }
@@ -232,7 +232,7 @@ func TestDiscoveryInflightIsBounded(t *testing.T) {
 	defer close(s.gate)
 
 	for i := 0; i < maxDiscoveryInflight+50; i++ {
-		d.name(context.Background(), addr(netip.AddrFrom4([4]byte{10, 0, byte(i / 256), byte(i % 256)}).String()), testLocal)
+		d.name(context.Background(), addr(netip.AddrFrom4([4]byte{10, 0, byte(i / 256), byte(i % 256)}).String()), testLocal, true)
 	}
 
 	d.mu.Lock()
@@ -245,10 +245,10 @@ func TestDiscoveryInflightIsBounded(t *testing.T) {
 
 func TestDiscoveryDisabled(t *testing.T) {
 	var d *discoverer
-	if got := d.name(context.Background(), addr("192.168.1.5"), testLocal); got != "" {
+	if got := d.name(context.Background(), addr("192.168.1.5"), testLocal, true); got != "" {
 		t.Errorf("nil discoverer returned %q", got)
 	}
-	if got := newDiscoverer().name(context.Background(), addr("192.168.1.5"), testLocal); got != "" {
+	if got := newDiscoverer().name(context.Background(), addr("192.168.1.5"), testLocal, true); got != "" {
 		t.Errorf("unconfigured discoverer returned %q", got)
 	}
 }
@@ -368,7 +368,7 @@ func TestDiscoveryMarksItsOwnContext(t *testing.T) {
 		t.Fatal("a plain context should not look like a discovery lookup")
 	}
 
-	d.name(context.Background(), addr("192.168.1.5"), testLocal)
+	d.name(context.Background(), addr("192.168.1.5"), testLocal, true)
 	select {
 	case marked := <-seen:
 		if !marked {
@@ -386,11 +386,11 @@ func TestDiscoverySurvivesRequestCancellation(t *testing.T) {
 	d := newTestDiscoverer(s)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	d.name(ctx, addr("192.168.1.5"), testLocal)
+	d.name(ctx, addr("192.168.1.5"), testLocal, true)
 	cancel() // the client's query is answered and its context torn down
 	settle(t, d)
 
-	if got := d.name(context.Background(), addr("192.168.1.5"), testLocal); got != "laptop.lan." {
+	if got := d.name(context.Background(), addr("192.168.1.5"), testLocal, true); got != "laptop.lan." {
 		t.Errorf("got %q, want the lookup to have completed anyway", got)
 	}
 }
@@ -403,7 +403,7 @@ func TestDiscoveryWriterPresentsTheDevice(t *testing.T) {
 		return "", nil
 	}
 
-	d.name(context.Background(), addr("192.168.1.5"), testLocal)
+	d.name(context.Background(), addr("192.168.1.5"), testLocal, true)
 
 	select {
 	case w := <-got:
@@ -456,7 +456,7 @@ func TestDiscoveryPanicIsContained(t *testing.T) {
 		panic("resolver exploded")
 	}
 
-	d.name(context.Background(), addr("192.168.1.5"), testLocal)
+	d.name(context.Background(), addr("192.168.1.5"), testLocal, true)
 	settle(t, d)
 
 	// Survived, released its in-flight slot, and negative-cached so a panicking
@@ -484,7 +484,7 @@ func TestDiscoveryDrainJoinsInflight(t *testing.T) {
 		return "", nil
 	}
 
-	d.name(context.Background(), addr("192.168.1.5"), testLocal)
+	d.name(context.Background(), addr("192.168.1.5"), testLocal, true)
 
 	// Nothing finished yet, so wait must not return early.
 	start := time.Now()
@@ -515,7 +515,7 @@ func TestDiscoveryDrainIsBounded(t *testing.T) {
 		<-stuck
 		return "", nil
 	}
-	d.name(context.Background(), addr("192.168.1.5"), testLocal)
+	d.name(context.Background(), addr("192.168.1.5"), testLocal, true)
 
 	start := time.Now()
 	d.drain(100 * time.Millisecond)
@@ -538,7 +538,7 @@ func TestDiscoveryRefusesNewLookupsWhileShuttingDown(t *testing.T) {
 	d := newTestDiscoverer(s)
 	d.timeout = 5 * time.Second
 
-	d.name(context.Background(), addr("192.168.1.5"), testLocal) // one in flight
+	d.name(context.Background(), addr("192.168.1.5"), testLocal, true) // one in flight
 
 	waited := make(chan struct{})
 	go func() {
@@ -560,7 +560,7 @@ func TestDiscoveryRefusesNewLookupsWhileShuttingDown(t *testing.T) {
 	// A brand new address must not start a lookup now.
 	before := s.calls.Load()
 	for i := 0; i < 100; i++ {
-		d.name(context.Background(), addr(netip.AddrFrom4([4]byte{10, 0, 0, byte(i)}).String()), testLocal)
+		d.name(context.Background(), addr(netip.AddrFrom4([4]byte{10, 0, 0, byte(i)}).String()), testLocal, true)
 	}
 	if got := s.calls.Load(); got != before {
 		t.Errorf("%d lookups started after shutdown began, want 0", got-before)
@@ -586,7 +586,7 @@ func TestDiscoveryShutdownUnderLoad(t *testing.T) {
 
 		// One lookup in flight, so wait registers as a waiter rather than
 		// returning straight away.
-		d.name(context.Background(), addr("192.168.1.5"), testLocal)
+		d.name(context.Background(), addr("192.168.1.5"), testLocal, true)
 
 		waiting := make(chan struct{})
 		go func() {
@@ -604,7 +604,7 @@ func TestDiscoveryShutdownUnderLoad(t *testing.T) {
 				<-waiting
 				for j := 0; j < 25; j++ {
 					d.name(context.Background(),
-						addr(netip.AddrFrom4([4]byte{10, byte(round), byte(i), byte(j)}).String()), testLocal)
+						addr(netip.AddrFrom4([4]byte{10, byte(round), byte(i), byte(j)}).String()), testLocal, true)
 				}
 			}(i)
 		}
@@ -710,7 +710,7 @@ func TestDiscoveryWaitAttributesTheFirstQuery(t *testing.T) {
 	d := newTestDiscoverer(s)
 	d.wait = 2 * time.Second
 
-	if got := d.name(context.Background(), addr("192.168.1.5"), testLocal); got != "laptop.lan." {
+	if got := d.name(context.Background(), addr("192.168.1.5"), testLocal, true); got != "laptop.lan." {
 		t.Errorf("first query = %q, want the name — the hold should have caught it", got)
 	}
 	settle(t, d)
@@ -728,7 +728,7 @@ func TestDiscoveryWaitIsBoundedByTheWait(t *testing.T) {
 	defer close(s.gate)
 
 	start := time.Now()
-	got := d.name(context.Background(), addr("192.168.1.5"), testLocal)
+	got := d.name(context.Background(), addr("192.168.1.5"), testLocal, true)
 	elapsed := time.Since(start)
 
 	if got != "" {
@@ -757,7 +757,7 @@ func TestDiscoveryWaitReleasedByContext(t *testing.T) {
 	}()
 
 	start := time.Now()
-	d.name(ctx, addr("192.168.1.5"), testLocal)
+	d.name(ctx, addr("192.168.1.5"), testLocal, true)
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Errorf("returned after %v, want the cancelled context to release it", elapsed)
 	}
@@ -776,7 +776,7 @@ func TestDiscoveryWaitSkippedWhenAnameIsKnown(t *testing.T) {
 	d.mu.Unlock()
 
 	start := time.Now()
-	got := d.name(context.Background(), addr("192.168.1.5"), testLocal)
+	got := d.name(context.Background(), addr("192.168.1.5"), testLocal, true)
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Errorf("waited %v with a name already available", elapsed)
 	}
@@ -802,7 +802,7 @@ func TestDiscoveryWaitSharedAcrossConcurrentQueries(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			got[i] = d.name(context.Background(), addr("192.168.1.5"), testLocal)
+			got[i] = d.name(context.Background(), addr("192.168.1.5"), testLocal, true)
 		}(i)
 	}
 
@@ -828,7 +828,7 @@ func TestDiscoveryWaitDisabled(t *testing.T) {
 	defer close(s.gate)
 
 	start := time.Now()
-	if got := d.name(context.Background(), addr("192.168.1.5"), testLocal); got != "" {
+	if got := d.name(context.Background(), addr("192.168.1.5"), testLocal, true); got != "" {
 		t.Errorf("got %q, want nothing with the hold disabled", got)
 	}
 	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {

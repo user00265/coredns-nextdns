@@ -790,7 +790,7 @@ func TestZonedAndMappedClientAddresses(t *testing.T) {
 		t.Errorf("profile = %q, want linklo — the zone stopped the prefix matching", got)
 	}
 
-	ci := n.devices.lookup(context.Background(), state, "abc123")
+	ci := n.devices.lookup(context.Background(), state, "abc123", true)
 	if ci.IP != "fe80::1" {
 		t.Errorf("X-Device-Ip = %q, want the zone stripped", ci.IP)
 	}
@@ -872,4 +872,79 @@ func TestMaxConcurrentDoesNotRefuseCacheHits(t *testing.T) {
 // block is bound to a view.
 func withView(ctx context.Context, name string) context.Context {
 	return context.WithValue(ctx, dnsserver.ViewKey{}, name)
+}
+
+// A cached answer sends nothing upstream, so there is no request for a device
+// name to ride on. Holding the query for a cold lookup would be pure latency.
+func TestServeDNSCacheHitDoesNotHoldForDiscovery(t *testing.T) {
+	c, cap := fakeNextDNS(t, "example.org. 300 IN A 127.0.0.1")
+	n := newTestPlugin(t, c, "abc123")
+	n.cache = newMsgCache(100, c)
+
+	// A discovery resolver that never answers, with a hold long enough that
+	// waiting on it would be unmistakable.
+	stall := make(chan struct{})
+	defer close(stall)
+	n.devices.discovery = newDiscoverer()
+	n.devices.discovery.wait = 10 * time.Second
+	n.devices.discovery.timeout = 10 * time.Second
+	n.devices.discovery.resolve = func(ctx context.Context, _ string, _ dns.ResponseWriter) (string, error) {
+		select {
+		case <-stall:
+		case <-ctx.Done():
+		}
+		return "", nil
+	}
+
+	// Prime the cache directly, so this test is only about the hit path.
+	n.cache.put("abc123", testState("example.org.", dns.TypeA),
+		reply("example.org.", "example.org. 300 IN A 127.0.0.1"))
+
+	ctx := metadata.ContextWithMetadata(context.Background())
+	rec := dnstest.NewRecorder(&test.ResponseWriter{})
+
+	start := time.Now()
+	if _, err := n.ServeDNS(ctx, rec, query("example.org.", dns.TypeA)); err != nil {
+		t.Fatal(err)
+	}
+	elapsed := time.Since(start)
+
+	if elapsed > 2*time.Second {
+		t.Errorf("cache hit took %v; it waited on a device lookup it had no use for", elapsed)
+	}
+	if rec.Msg == nil || len(rec.Msg.Answer) != 1 {
+		t.Fatalf("got %v, want the cached answer", rec.Msg)
+	}
+	if cap.calls.Load() != 0 {
+		t.Errorf("upstream called %d times, want 0 — the answer was already cached", cap.calls.Load())
+	}
+	// The identity is still published for the log, minus the name nobody could
+	// discover.
+	if f := metadata.ValueFunc(ctx, "nextdns/device-id"); f == nil || f() == "" {
+		t.Error("a cache hit published no device ID; the log line loses its attribution")
+	}
+}
+
+// ...but a query actually going upstream still waits, since that is the request
+// the name is attached to.
+func TestServeDNSCacheMissHoldsForDiscovery(t *testing.T) {
+	c, _ := fakeNextDNS(t, "example.org. 300 IN A 127.0.0.1")
+	n := newTestPlugin(t, c, "abc123")
+
+	n.devices.discovery = newDiscoverer()
+	n.devices.discovery.wait = 2 * time.Second
+	n.devices.discovery.resolve = func(context.Context, string, dns.ResponseWriter) (string, error) {
+		return "held.lan.", nil
+	}
+
+	ctx := metadata.ContextWithMetadata(context.Background())
+	rec := dnstest.NewRecorder(&test.ResponseWriter{})
+	if _, err := n.ServeDNS(ctx, rec, query("example.org.", dns.TypeA)); err != nil {
+		t.Fatal(err)
+	}
+
+	f := metadata.ValueFunc(ctx, "nextdns/device-name")
+	if f == nil || f() != "held" {
+		t.Errorf("device name = %v, want the held lookup to have named the first query", f)
+	}
 }

@@ -125,16 +125,24 @@ func (n *NextDNS) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		return plugin.NextOrFailure(pluginName, n.Next, ctx, w, r)
 	}
 
-	ci := n.devices.lookup(ctx, &state, profile)
-	n.publish(ctx, profile, ci)
-
+	// The cache is consulted before the device is identified, because what the
+	// device identity is *for* is the request to NextDNS. An answer served from
+	// here sends nothing upstream, so holding the query for a cold device name
+	// would buy nothing and cost the client the wait. The lookup still runs —
+	// unheld — so the name is published for the log and warm for the next miss.
 	if n.cache != nil {
 		if m, ok := n.cache.get(profile, &state); ok {
 			cacheHits.WithLabelValues(server).Inc()
+			n.publish(ctx, profile, n.devices.lookup(ctx, &state, profile, false))
 			return n.reply(&state, m, server, profile)
 		}
 		cacheMisses.WithLabelValues(server).Inc()
 	}
+
+	// Going upstream: this is the query the name is attached to, so it is worth
+	// waiting a moment for.
+	ci := n.devices.lookup(ctx, &state, profile, true)
+	n.publish(ctx, profile, ci)
 
 	// Only the upstream exchange is worth limiting, so the slot is taken after
 	// the cache has had its say. Taking it earlier let a burst of cache hits —

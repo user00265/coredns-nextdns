@@ -158,7 +158,8 @@ func clientAddr(ip string) (netip.Addr, bool) {
 
 // lookup builds the ClientInfo for the client that sent state, under a given
 // profile.
-func (d *deviceDB) lookup(ctx context.Context, state *request.Request, profile string) ClientInfo {
+// mayHold is passed through to reverse-DNS discovery: see discoverer.name.
+func (d *deviceDB) lookup(ctx context.Context, state *request.Request, profile string, mayHold bool) ClientInfo {
 	var ci ClientInfo
 
 	addr, ok := clientAddr(state.IP())
@@ -185,7 +186,7 @@ func (d *deviceDB) lookup(ctx context.Context, state *request.Request, profile s
 	// Reverse DNS is the last resort: it costs a query, so it is only asked when
 	// nothing on disk knew this address.
 	if info.name == "" {
-		info.name = d.discovery.name(ctx, addr, state.W.LocalAddr())
+		info.name = d.discovery.name(ctx, addr, state.W.LocalAddr(), mayHold)
 	}
 	ci.Name = normalizeName(info.name)
 

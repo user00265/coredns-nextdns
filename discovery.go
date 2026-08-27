@@ -131,7 +131,11 @@ func newDiscoverer() *discoverer {
 // lookup's own timeout. It only ever happens when there is nothing to show:
 // with a name in hand, even an expired one, the query is answered immediately
 // and the refresh runs behind it.
-func (d *discoverer) name(ctx context.Context, addr netip.Addr, local net.Addr) string {
+// mayHold says whether the caller is willing to be held while a cold lookup
+// runs. A query the cache can already answer is not: it sends nothing upstream,
+// so there is no name for the hold to attach to and the wait would be pure
+// latency.
+func (d *discoverer) name(ctx context.Context, addr netip.Addr, local net.Addr, mayHold bool) string {
 	if d == nil || d.resolve == nil {
 		return ""
 	}
@@ -149,7 +153,7 @@ func (d *discoverer) name(ctx context.Context, addr netip.Addr, local net.Addr) 
 	// second lookup for the same device.
 	if ch, busy := d.inflight[addr]; busy {
 		d.mu.Unlock()
-		if d.wait > 0 && e.name == "" {
+		if mayHold && d.wait > 0 && e.name == "" {
 			return d.hold(ctx, addr, ch)
 		}
 		return e.name
@@ -171,9 +175,9 @@ func (d *discoverer) name(ctx context.Context, addr netip.Addr, local net.Addr) 
 	// dispatches through.
 	go d.lookup(context.WithoutCancel(ctx), addr, local, done)
 
-	// Hold only when there is nothing to serve. Handing out a stale name at once
-	// beats delaying a query for a fresher one.
-	if d.wait <= 0 || e.name != "" {
+	// Hold only when there is nothing to serve and the caller can afford it.
+	// Handing out a stale name at once beats delaying a query for a fresher one.
+	if !mayHold || d.wait <= 0 || e.name != "" {
 		return e.name
 	}
 	return d.hold(ctx, addr, done)
