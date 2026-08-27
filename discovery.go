@@ -37,7 +37,10 @@ import (
 // of the client that asked it, forever.
 
 const (
-	defaultDiscoveryTTL     = time.Hour
+	// defaultDiscoveryTTL matches the official nextdns client, which expires a
+	// discovered name after five minutes, so that a rename or a reassigned DHCP
+	// lease is picked up promptly rather than an hour later.
+	defaultDiscoveryTTL     = 5 * time.Minute
 	defaultDiscoveryRetry   = 5 * time.Minute
 	defaultDiscoveryTimeout = 2 * time.Second
 	defaultDiscoveryWait    = 200 * time.Millisecond
