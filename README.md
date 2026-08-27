@@ -190,7 +190,7 @@ whose policy varies by device.
 | Option | Default | |
 | --- | --- | --- |
 | `discovery internal\|ADDR...` | off | `internal` resolves through CoreDNS itself; addresses are queried directly, port 53 by default. |
-| `discovery_ttl DURATION` | `1h` | Lifetime of a discovered name. |
+| `discovery_ttl DURATION` | `5m` | Lifetime of a discovered name. |
 | `discovery_retry DURATION` | `5m` | Delay before retrying an address that produced no name — no PTR record, a resolver error, or a failed lookup. |
 | `discovery_wait DURATION` | `200ms` | How long a query is held waiting for a cold lookup. `0` answers immediately. |
 | `discovery_timeout DURATION` | `2s` | One lookup. |
@@ -206,10 +206,15 @@ doesn't make it in time the query goes out unnamed and the name is there by the 
 hold is released early if the client gives up. Concurrent queries from one device share the single
 lookup and are all released by it.
 
-The hold only happens when there is nothing to show. Once a name is known — even an expired one — it
-is served immediately and the refresh runs behind the query. The cost is therefore at most one held
-query per device per `discovery_ttl`, and `discovery_wait 0` restores answering immediately and
-letting the name catch up.
+The hold only happens when there is nothing to show, and only on a query that is actually going to
+NextDNS. Once a name is known — even an expired one — it is served immediately and the refresh runs
+behind the query. An answer served from cache is never held either: it sends nothing upstream, so
+there is no request for the name to ride on and waiting would be pure latency. Set `discovery_wait 0`
+to never hold at all and let the name catch up on the following query.
+
+For comparison, the official `nextdns` client does the same reverse lookup *inline* on every query,
+bounded only by a 100 ms socket deadline with no retries, and does it even for answers it serves from
+its own cache. The hold here is the same idea with a longer budget and fewer occasions to spend it.
 
 Lookups can't recurse: a lookup is marked on its context, and a marked query is never enriched or
 sent to NextDNS.
