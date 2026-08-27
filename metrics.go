@@ -78,6 +78,13 @@ var (
 		Help:      "Counter of reverse DNS device lookups by result.",
 	}, []string{"result"})
 
+	discoveryWaits = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: plugin.Namespace,
+		Subsystem: pluginName,
+		Name:      "discovery_waits_total",
+		Help:      "Counter of queries held for a cold device lookup, by how the hold ended.",
+	}, []string{"result"})
+
 	discoveryEntries = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: plugin.Namespace,
 		Subsystem: pluginName,

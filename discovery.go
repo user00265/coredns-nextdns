@@ -40,6 +40,7 @@ const (
 	defaultDiscoveryTTL     = time.Hour
 	defaultDiscoveryRetry   = 5 * time.Minute
 	defaultDiscoveryTimeout = 2 * time.Second
+	defaultDiscoveryWait    = 200 * time.Millisecond
 	defaultDiscoveryMax     = 4096
 
 	// maxDiscoveryInflight bounds the lookups running at once. Each cold client
@@ -78,6 +79,9 @@ type discoverer struct {
 	resolve resolveFunc
 	labels  metricLabels
 	ttl     time.Duration
+	// wait is how long a query is held on a cold miss, waiting for the lookup
+	// it just started. Zero answers immediately and lets the name catch up.
+	wait    time.Duration
 	retry   time.Duration
 	timeout time.Duration
 	max     int
@@ -95,10 +99,13 @@ type discoverer struct {
 	wg sync.WaitGroup
 
 	mu sync.Mutex
-	// closing is set before wait blocks, and no lookup may start once it is set.
-	closing  bool
-	entries  map[netip.Addr]discoveryEntry
-	inflight map[netip.Addr]struct{}
+	// closing is set before drain blocks, and no lookup may start once it is set.
+	closing bool
+	entries map[netip.Addr]discoveryEntry
+	// inflight maps an address being looked up to a channel closed when the
+	// result lands, so that every query waiting on that device is released
+	// together rather than only the one that started it.
+	inflight map[netip.Addr]chan struct{}
 }
 
 func newDiscoverer() *discoverer {
@@ -106,16 +113,24 @@ func newDiscoverer() *discoverer {
 		ttl:      defaultDiscoveryTTL,
 		retry:    defaultDiscoveryRetry,
 		timeout:  defaultDiscoveryTimeout,
+		wait:     defaultDiscoveryWait,
 		max:      defaultDiscoveryMax,
 		entries:  map[netip.Addr]discoveryEntry{},
-		inflight: map[netip.Addr]struct{}{},
+		inflight: map[netip.Addr]chan struct{}{},
 	}
 }
 
-// name returns the discovered name for addr. It never blocks: on a miss it
-// schedules the lookup and returns what it has, which on a cold miss is
-// nothing. A name that has expired is still returned while its refresh runs,
-// because a slightly stale device name beats no device name.
+// name returns the discovered name for addr.
+//
+// On a cold miss it starts the lookup and holds the query for up to wait, so
+// that a device's very first query is attributed too — that first query is
+// often the one you most want to see named, and letting it go out bare is what
+// makes a new device show up in the NextDNS log as a bare ID.
+//
+// The hold is bounded three ways: by wait, by the caller's context, and by the
+// lookup's own timeout. It only ever happens when there is nothing to show:
+// with a name in hand, even an expired one, the query is answered immediately
+// and the refresh runs behind it.
 func (d *discoverer) name(ctx context.Context, addr netip.Addr, local net.Addr) string {
 	if d == nil || d.resolve == nil {
 		return ""
@@ -129,27 +144,74 @@ func (d *discoverer) name(ctx context.Context, addr netip.Addr, local net.Addr) 
 		d.mu.Unlock()
 		return e.name
 	}
-	_, busy := d.inflight[addr]
-	if busy || d.closing || len(d.inflight) >= maxDiscoveryInflight {
+
+	// Somebody is already asking. Wait on their answer rather than starting a
+	// second lookup for the same device.
+	if ch, busy := d.inflight[addr]; busy {
+		d.mu.Unlock()
+		if d.wait > 0 && e.name == "" {
+			return d.hold(ctx, addr, ch)
+		}
+		return e.name
+	}
+
+	if d.closing || len(d.inflight) >= maxDiscoveryInflight {
 		d.mu.Unlock()
 		return e.name
 	}
-	d.inflight[addr] = struct{}{}
-	d.wg.Add(1) // under d.mu and only while not closing, so wait cannot race it
+
+	done := make(chan struct{})
+	d.inflight[addr] = done
+	d.wg.Add(1) // under d.mu and only while not closing, so drain cannot race it
 	d.mu.Unlock()
 
-	// The triggering query is answered without waiting for this, so the lookup
-	// must not be cancelled when that query's context is torn down. It does
-	// still need the context values, in particular the server the internal
-	// resolver dispatches through.
-	go d.lookup(context.WithoutCancel(ctx), addr, local)
+	// The lookup outlives the query that triggered it either way, so it must not
+	// be cancelled when that query's context is torn down. It does still need
+	// the context values, in particular the server the internal resolver
+	// dispatches through.
+	go d.lookup(context.WithoutCancel(ctx), addr, local, done)
 
-	return e.name
+	// Hold only when there is nothing to serve. Handing out a stale name at once
+	// beats delaying a query for a fresher one.
+	if d.wait <= 0 || e.name != "" {
+		return e.name
+	}
+	return d.hold(ctx, addr, done)
 }
 
-// lookup performs one reverse lookup and records the result.
-func (d *discoverer) lookup(ctx context.Context, addr netip.Addr, local net.Addr) {
+// hold blocks until the lookup for addr lands, the wait elapses, or the caller
+// gives up, then returns whatever name ended up on record.
+func (d *discoverer) hold(ctx context.Context, addr netip.Addr, done <-chan struct{}) string {
+	t := time.NewTimer(d.wait)
+	defer t.Stop()
+
+	select {
+	case <-done:
+	case <-t.C:
+		// Not back in time. The lookup carries on regardless, so the next query
+		// from this device will have the name.
+		discoveryWaits.WithLabelValues("timeout").Inc()
+		return ""
+	case <-ctx.Done():
+		discoveryWaits.WithLabelValues("cancelled").Inc()
+		return ""
+	}
+
+	d.mu.Lock()
+	name := d.entries[addr].name
+	d.mu.Unlock()
+
+	discoveryWaits.WithLabelValues("resolved").Inc()
+	return name
+}
+
+// lookup performs one reverse lookup and records the result. done is closed
+// once the result is stored, releasing any queries held in hold.
+func (d *discoverer) lookup(ctx context.Context, addr netip.Addr, local net.Addr, done chan struct{}) {
 	defer d.wg.Done()
+	// Registered before the cleanup below, so it runs after it: by the time the
+	// waiters are released the entry is already stored.
+	defer close(done)
 	defer func() {
 		d.mu.Lock()
 		delete(d.inflight, addr)
@@ -211,17 +273,17 @@ func (d *discoverer) store(addr netip.Addr, name string, ttl time.Duration) {
 	d.labels.set(discoveryEntries, float64(n))
 }
 
-// wait blocks until the in-flight lookups finish, or until max elapses. The
+// drain blocks until the in-flight lookups finish, or until max elapses. The
 // bound matters because a lookup can only be as slow as its own timeout, but
 // shutdown should not be hostage to a resolver that never answers at all.
-func (d *discoverer) wait(max time.Duration) {
+func (d *discoverer) drain(max time.Duration) {
 	if d == nil {
 		return
 	}
 
 	// Stop admitting lookups first. Every Add happens under this lock with
 	// closing false, so setting it here establishes that no Add can begin after
-	// Wait does.
+	// the Wait below does.
 	d.mu.Lock()
 	d.closing = true
 	d.mu.Unlock()

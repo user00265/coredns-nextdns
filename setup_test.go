@@ -424,3 +424,40 @@ func TestReachableRoutes(t *testing.T) {
 		}
 	}
 }
+
+func TestSetupDiscoveryWait(t *testing.T) {
+	n, err := parseNextDNS(caddy.NewTestController("dns", corefile(
+		"discovery internal", "discovery_wait 500ms")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n.devices.discovery.wait != 500*time.Millisecond {
+		t.Errorf("wait = %v, want 500ms", n.devices.discovery.wait)
+	}
+
+	// Zero is the documented way to turn the hold off.
+	n, err = parseNextDNS(caddy.NewTestController("dns", corefile(
+		"discovery internal", "discovery_wait 0")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n.devices.discovery.wait != 0 {
+		t.Errorf("wait = %v, want it disabled", n.devices.discovery.wait)
+	}
+
+	// On by default.
+	n, _ = parseNextDNS(caddy.NewTestController("dns", corefile("discovery internal")))
+	if n.devices.discovery.wait != defaultDiscoveryWait {
+		t.Errorf("wait = %v, want the default", n.devices.discovery.wait)
+	}
+
+	for _, options := range [][]string{
+		{"discovery internal", "discovery_wait -1s"},
+		{"discovery internal", "discovery_wait notaduration"},
+		{"discovery_wait 100ms"}, // no discovery
+	} {
+		if _, err := parseNextDNS(caddy.NewTestController("dns", corefile(options...))); err == nil {
+			t.Errorf("expected an error for %v", options)
+		}
+	}
+}

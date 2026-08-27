@@ -60,6 +60,7 @@ func newTestDiscoverer(s *stubResolver) *discoverer {
 	d.ttl = 50 * time.Millisecond
 	d.retry = 20 * time.Millisecond
 	d.timeout = time.Second
+	d.wait = 0 // these cover the asynchronous path; the hold has its own tests
 	return d
 }
 
@@ -472,7 +473,7 @@ func TestDiscoveryPanicIsContained(t *testing.T) {
 }
 
 // Shutdown must join detached lookups, not abandon them.
-func TestDiscoveryWaitJoinsInflight(t *testing.T) {
+func TestDiscoveryDrainJoinsInflight(t *testing.T) {
 	release := make(chan struct{})
 	finished := make(chan struct{})
 	d := newDiscoverer()
@@ -491,20 +492,20 @@ func TestDiscoveryWaitJoinsInflight(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		close(release)
 	}()
-	d.wait(5 * time.Second)
+	d.drain(5 * time.Second)
 
 	select {
 	case <-finished:
 	default:
-		t.Fatal("wait returned before the in-flight lookup finished")
+		t.Fatal("drain returned before the in-flight lookup finished")
 	}
 	if elapsed := time.Since(start); elapsed < 50*time.Millisecond {
-		t.Errorf("wait returned after %v, want it to block until the lookup finished", elapsed)
+		t.Errorf("drain returned after %v, want it to block until the lookup finished", elapsed)
 	}
 }
 
 // ...but a resolver that never returns must not hold shutdown open forever.
-func TestDiscoveryWaitIsBounded(t *testing.T) {
+func TestDiscoveryDrainIsBounded(t *testing.T) {
 	stuck := make(chan struct{})
 	t.Cleanup(func() { close(stuck) })
 
@@ -517,15 +518,15 @@ func TestDiscoveryWaitIsBounded(t *testing.T) {
 	d.name(context.Background(), addr("192.168.1.5"), testLocal)
 
 	start := time.Now()
-	d.wait(100 * time.Millisecond)
+	d.drain(100 * time.Millisecond)
 	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Errorf("wait blocked for %v, want it bounded by its grace period", elapsed)
+		t.Errorf("drain blocked for %v, want it bounded by its grace period", elapsed)
 	}
 }
 
-func TestDiscoveryWaitOnNilIsSafe(t *testing.T) {
+func TestDiscoveryDrainOnNilIsSafe(t *testing.T) {
 	var d *discoverer
-	d.wait(time.Second) // discovery not configured
+	d.drain(time.Second) // discovery not configured
 }
 
 // Queries can still be in flight when the server shuts down. A lookup starting
@@ -541,7 +542,7 @@ func TestDiscoveryRefusesNewLookupsWhileShuttingDown(t *testing.T) {
 
 	waited := make(chan struct{})
 	go func() {
-		d.wait(5 * time.Second)
+		d.drain(5 * time.Second)
 		close(waited)
 	}()
 
@@ -590,7 +591,7 @@ func TestDiscoveryShutdownUnderLoad(t *testing.T) {
 		waiting := make(chan struct{})
 		go func() {
 			close(waiting)
-			d.wait(5 * time.Second)
+			d.drain(5 * time.Second)
 		}()
 		<-waiting
 
@@ -609,7 +610,7 @@ func TestDiscoveryShutdownUnderLoad(t *testing.T) {
 		}
 		close(release)
 		wg.Wait()
-		d.wait(2 * time.Second) // shutdown may run more than once
+		d.drain(2 * time.Second) // shutdown may run more than once
 	}
 }
 
@@ -699,5 +700,138 @@ func TestInternalResolverWithoutServer(t *testing.T) {
 	}
 	if _, err := resolve(context.Background(), "1.0.0.10.in-addr.arpa.", w); err == nil {
 		t.Error("expected an error with no server on the context")
+	}
+}
+
+// The point of the hold: a device's very first query is attributed too, instead
+// of going out bare and showing up in the NextDNS log as an unnamed ID.
+func TestDiscoveryWaitAttributesTheFirstQuery(t *testing.T) {
+	s := &stubResolver{names: map[string]string{"5.1.168.192.in-addr.arpa.": "laptop.lan."}}
+	d := newTestDiscoverer(s)
+	d.wait = 2 * time.Second
+
+	if got := d.name(context.Background(), addr("192.168.1.5"), testLocal); got != "laptop.lan." {
+		t.Errorf("first query = %q, want the name — the hold should have caught it", got)
+	}
+	settle(t, d)
+	if got := s.calls.Load(); got != 1 {
+		t.Errorf("resolver called %d times, want 1", got)
+	}
+}
+
+// ...but never for longer than the configured wait, however slow the resolver.
+func TestDiscoveryWaitIsBoundedByTheWait(t *testing.T) {
+	s := &stubResolver{gate: make(chan struct{})} // never answers
+	d := newTestDiscoverer(s)
+	d.wait = 60 * time.Millisecond
+	d.timeout = 10 * time.Second
+	defer close(s.gate)
+
+	start := time.Now()
+	got := d.name(context.Background(), addr("192.168.1.5"), testLocal)
+	elapsed := time.Since(start)
+
+	if got != "" {
+		t.Errorf("got %q, want nothing when the lookup did not land in time", got)
+	}
+	if elapsed < 50*time.Millisecond {
+		t.Errorf("returned after %v, want it to have actually waited", elapsed)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("returned after %v, want it bounded by the wait", elapsed)
+	}
+}
+
+// A client that gives up should not keep a goroutine parked here.
+func TestDiscoveryWaitReleasedByContext(t *testing.T) {
+	s := &stubResolver{gate: make(chan struct{})}
+	d := newTestDiscoverer(s)
+	d.wait = 10 * time.Second
+	d.timeout = 10 * time.Second
+	defer close(s.gate)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	d.name(ctx, addr("192.168.1.5"), testLocal)
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("returned after %v, want the cancelled context to release it", elapsed)
+	}
+}
+
+// With a name already in hand, even a stale one, answer now and refresh behind.
+func TestDiscoveryWaitSkippedWhenAnameIsKnown(t *testing.T) {
+	s := &stubResolver{gate: make(chan struct{})}
+	d := newTestDiscoverer(s)
+	d.wait = 10 * time.Second
+	d.timeout = 10 * time.Second
+	defer close(s.gate)
+
+	d.mu.Lock()
+	d.entries[addr("192.168.1.5")] = discoveryEntry{name: "stale.lan.", expires: time.Now().Add(-time.Second)}
+	d.mu.Unlock()
+
+	start := time.Now()
+	got := d.name(context.Background(), addr("192.168.1.5"), testLocal)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("waited %v with a name already available", elapsed)
+	}
+	if got != "stale.lan." {
+		t.Errorf("got %q, want the stale name served immediately", got)
+	}
+}
+
+// Concurrent queries from one device share the single lookup, and all of them
+// are released by it — not just whichever one happened to start it.
+func TestDiscoveryWaitSharedAcrossConcurrentQueries(t *testing.T) {
+	release := make(chan struct{})
+	s := &stubResolver{
+		names: map[string]string{"5.1.168.192.in-addr.arpa.": "laptop.lan."},
+		gate:  release,
+	}
+	d := newTestDiscoverer(s)
+	d.wait = 3 * time.Second
+
+	var wg sync.WaitGroup
+	got := make([]string, 8)
+	for i := range got {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			got[i] = d.name(context.Background(), addr("192.168.1.5"), testLocal)
+		}(i)
+	}
+
+	time.Sleep(50 * time.Millisecond) // let them all pile onto the same lookup
+	close(release)
+	wg.Wait()
+
+	for i, name := range got {
+		if name != "laptop.lan." {
+			t.Errorf("caller %d got %q, want every waiter released with the name", i, name)
+		}
+	}
+	if calls := s.calls.Load(); calls != 1 {
+		t.Errorf("resolver called %d times, want one lookup shared by all callers", calls)
+	}
+}
+
+// Turning the hold off restores the fire-and-catch-up behaviour.
+func TestDiscoveryWaitDisabled(t *testing.T) {
+	s := &stubResolver{gate: make(chan struct{})}
+	d := newTestDiscoverer(s)
+	d.wait = 0
+	defer close(s.gate)
+
+	start := time.Now()
+	if got := d.name(context.Background(), addr("192.168.1.5"), testLocal); got != "" {
+		t.Errorf("got %q, want nothing with the hold disabled", got)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Errorf("blocked for %v with the hold disabled", elapsed)
 	}
 }

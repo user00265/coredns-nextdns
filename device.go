@@ -319,7 +319,7 @@ func (d *deviceDB) stop() {
 	// Detached reverse lookups are the one thing here that outlives the ticker,
 	// so join them rather than leaving them running against a server that is
 	// going away.
-	d.discovery.wait(shutdownGrace)
+	d.discovery.drain(shutdownGrace)
 }
 
 // refresh re-reads every configured source and swaps in the new table.

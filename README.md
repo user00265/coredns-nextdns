@@ -74,6 +74,7 @@ nextdns [PROFILE] {
     discovery internal|ADDR...
     discovery_ttl DURATION
     discovery_retry DURATION
+    discovery_wait DURATION
     discovery_timeout DURATION
     discovery_max N
 
@@ -191,15 +192,27 @@ whose policy varies by device.
 | `discovery internal\|ADDR...` | off | `internal` resolves through CoreDNS itself; addresses are queried directly, port 53 by default. |
 | `discovery_ttl DURATION` | `1h` | Lifetime of a discovered name. |
 | `discovery_retry DURATION` | `5m` | Delay before retrying an address that produced no name — no PTR record, a resolver error, or a failed lookup. |
+| `discovery_wait DURATION` | `200ms` | How long a query is held waiting for a cold lookup. `0` answers immediately. |
 | `discovery_timeout DURATION` | `2s` | One lookup. |
 | `discovery_max N` | `4096` | Table cap. |
 
 The name source that doesn't care where CoreDNS runs — most DHCP servers already publish leases as
 PTR records. Only consulted for clients nothing else could name.
 
-Lookups run asynchronously, so a device's first query goes out unnamed and the name is there by its
-second. They also can't recurse: a lookup is marked on its context, and a marked query is never
-enriched or sent to NextDNS.
+A device that has never been seen has no name yet, so its first query is held for up to
+`discovery_wait` while the lookup runs — long enough that a LAN PTR almost always lands, so that
+first query is attributed instead of showing up in the NextDNS log as a bare ID. If the lookup
+doesn't make it in time the query goes out unnamed and the name is there by the next one, and the
+hold is released early if the client gives up. Concurrent queries from one device share the single
+lookup and are all released by it.
+
+The hold only happens when there is nothing to show. Once a name is known — even an expired one — it
+is served immediately and the refresh runs behind the query. The cost is therefore at most one held
+query per device per `discovery_ttl`, and `discovery_wait 0` restores answering immediately and
+letting the name catch up.
+
+Lookups can't recurse: a lookup is marked on its context, and a marked query is never enriched or
+sent to NextDNS.
 
 With `internal`, something else in the chain has to answer the reverse zone — either ahead of
 `nextdns` or behind it, since the lookup is offered onward before this plugin gives up. If nothing
@@ -327,6 +340,7 @@ log . "{remote} {name} {type} -> {/nextdns/profile-used} {/nextdns/device-name} 
 | `coredns_nextdns_invalid_profiles_total` | |
 | `coredns_nextdns_mismatches_total` | `server` — upstream replies that did not answer the question |
 | `coredns_nextdns_discovery_lookups_total` | `result`: `found`, `notfound`, `error`, `panic` |
+| `coredns_nextdns_discovery_waits_total` | `result`: `resolved`, `timeout`, `cancelled` |
 | `coredns_nextdns_discovery_entries` | `server`, `zone`, `view` |
 | `coredns_nextdns_devices_known` | `server`, `zone`, `view` |
 

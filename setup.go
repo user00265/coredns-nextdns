@@ -142,6 +142,7 @@ func parseNextDNS(c *caddy.Controller) (*NextDNS, error) {
 		// Tuning is collected as pointers so that it can be applied after the
 		// whole block is read, and the options may appear in any order.
 		discoveryTTL, discoveryRetry, discoveryTimeout *time.Duration
+		discoveryWait                                  *time.Duration
 		discoveryMax                                   *int
 
 		reloadOn bool
@@ -371,6 +372,16 @@ func parseNextDNS(c *caddy.Controller) (*NextDNS, error) {
 				}
 				discoveryRetry = &d
 
+			case "discovery_wait":
+				d, err := parseDuration(c)
+				if err != nil {
+					return nil, err
+				}
+				if d < 0 {
+					return nil, c.Errf("discovery_wait cannot be negative")
+				}
+				discoveryWait = &d
+
 			case "discovery_timeout":
 				d, err := parseDuration(c)
 				if err != nil {
@@ -436,11 +447,15 @@ func parseNextDNS(c *caddy.Controller) (*NextDNS, error) {
 		if discoveryTimeout != nil {
 			d.timeout = *discoveryTimeout
 		}
+		if discoveryWait != nil {
+			d.wait = *discoveryWait
+		}
 		if discoveryMax != nil {
 			d.max = *discoveryMax
 		}
-	} else if discoveryTTL != nil || discoveryRetry != nil || discoveryTimeout != nil || discoveryMax != nil {
-		return nil, errors.New("discovery_ttl, discovery_retry, discovery_timeout and discovery_max need discovery to be enabled")
+	} else if discoveryTTL != nil || discoveryRetry != nil || discoveryTimeout != nil ||
+		discoveryWait != nil || discoveryMax != nil {
+		return nil, errors.New("the discovery_* options need discovery to be enabled")
 	}
 
 	// A bare "bootstrap" applies to every endpoint that did not bring its own.
